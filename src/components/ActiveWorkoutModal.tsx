@@ -1,0 +1,405 @@
+import React, { useState } from 'react';
+import { 
+  Play, 
+  Pause, 
+  Square, 
+  Flag, 
+  Minimize2, 
+  X, 
+  Flame, 
+  Check, 
+  RotateCcw,
+  Sparkles,
+  ChevronDown
+} from 'lucide-react';
+import { WorkoutSession, WorkoutLap } from '../types';
+import { getActivityIcon } from '../utils/activityIcons';
+
+interface ActiveWorkoutModalProps {
+  session: WorkoutSession;
+  isOpen: boolean;
+  isMinimized: boolean;
+  onTogglePause: () => void;
+  onRecordLap: () => void;
+  onFinish: (notes?: string, customName?: string) => void;
+  onDiscard: () => void;
+  onToggleMinimize: () => void;
+  onChangeActivityName: (name: string) => void;
+}
+
+const ACTIVITY_OPTIONS = ['Running', 'Gym', 'Cycling', 'Yoga', 'Swimming', 'Walking'];
+
+// Helper for calorie estimation based on activity and seconds
+function estimateCalories(activityName: string, seconds: number): number {
+  const mins = seconds / 60;
+  const lower = activityName.toLowerCase();
+  let calPerMin = 7;
+  if (lower.includes('run')) calPerMin = 11;
+  else if (lower.includes('gym') || lower.includes('work') || lower.includes('lift')) calPerMin = 8;
+  else if (lower.includes('cycl') || lower.includes('bike')) calPerMin = 9;
+  else if (lower.includes('swim')) calPerMin = 10;
+  else if (lower.includes('yoga') || lower.includes('stretch')) calPerMin = 4;
+  else if (lower.includes('walk')) calPerMin = 4.5;
+  return Math.round(mins * calPerMin);
+}
+
+// Format seconds into HH:MM:SS or MM:SS
+export function formatStopwatch(totalSeconds: number): { formatted: string; hours?: string; minutes: string; seconds: string } {
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+
+  const mm = String(mins).padStart(2, '0');
+  const ss = String(secs).padStart(2, '0');
+
+  if (hrs > 0) {
+    const hh = String(hrs).padStart(2, '0');
+    return { formatted: `${hh}:${mm}:${ss}`, hours: hh, minutes: mm, seconds: ss };
+  }
+  return { formatted: `${mm}:${ss}`, minutes: mm, seconds: ss };
+}
+
+export const ActiveWorkoutModal: React.FC<ActiveWorkoutModalProps> = ({
+  session,
+  isOpen,
+  isMinimized,
+  onTogglePause,
+  onRecordLap,
+  onFinish,
+  onDiscard,
+  onToggleMinimize,
+  onChangeActivityName,
+}) => {
+  const [showFinishConfirm, setShowFinishConfirm] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const [notes, setNotes] = useState('');
+  const [isChangingType, setIsChangingType] = useState(false);
+
+  if (!isOpen || isMinimized) return null;
+
+  const { minutes, seconds, hours } = formatStopwatch(session.secondsElapsed);
+  const estCalories = estimateCalories(session.activityName, session.secondsElapsed);
+  const durationMinutes = Math.max(1, Math.round(session.secondsElapsed / 60));
+
+  const handleFinishSave = () => {
+    onFinish(notes.trim() || undefined, session.activityName);
+    setShowFinishConfirm(false);
+  };
+
+  return (
+    <div className="absolute inset-0 z-50 flex flex-col bg-slate-950/95 dark:bg-slate-950/98 text-white backdrop-blur-md animate-in fade-in duration-200 overflow-hidden">
+      {/* Top Bar */}
+      <div className="flex items-center justify-between px-5 pt-12 pb-3 border-b border-slate-800/80">
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-2.5 w-2.5">
+            {!session.isPaused && (
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            )}
+            <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${session.isPaused ? 'bg-amber-400' : 'bg-emerald-500'}`}></span>
+          </span>
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+            {session.isPaused ? 'Workout Paused' : 'Live Workout Session'}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onToggleMinimize}
+            title="Minimize Timer"
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors cursor-pointer"
+          >
+            <Minimize2 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setShowDiscardConfirm(true)}
+            title="Discard Workout"
+            className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-slate-800/80 transition-colors cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col items-center justify-between px-6 py-6 overflow-y-auto">
+        {/* Activity Selector / Badge */}
+        <div className="w-full flex flex-col items-center">
+          <div className="relative">
+            <button
+              onClick={() => setIsChangingType(!isChangingType)}
+              className="flex items-center gap-2 px-4 py-2 rounded-full bg-blue-600/30 border border-blue-500/40 text-blue-300 hover:bg-blue-600/40 active:scale-95 transition-all cursor-pointer"
+            >
+              <span className="p-1 rounded-full bg-blue-500/30 text-blue-200">
+                {getActivityIcon(session.activityName)}
+              </span>
+              <span className="font-bold text-sm text-white tracking-wide">
+                {session.activityName}
+              </span>
+              <ChevronDown className="w-3.5 h-3.5 text-blue-300" />
+            </button>
+
+            {/* Quick Activity Dropdown */}
+            {isChangingType && (
+              <div className="absolute top-12 left-1/2 -translate-x-1/2 z-20 w-44 bg-slate-900 border border-slate-700 rounded-2xl p-1.5 shadow-2xl backdrop-blur-xl">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1">
+                  Change Activity
+                </p>
+                <div className="space-y-0.5">
+                  {ACTIVITY_OPTIONS.map((opt) => (
+                    <button
+                      key={opt}
+                      onClick={() => {
+                        onChangeActivityName(opt);
+                        setIsChangingType(false);
+                      }}
+                      className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-left transition-colors ${
+                        session.activityName === opt
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                      }`}
+                    >
+                      <span className="w-4 h-4 flex items-center justify-center">
+                        {getActivityIcon(opt)}
+                      </span>
+                      <span>{opt}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <p className="text-xs text-slate-400 mt-2 font-medium">
+            Started Today • Quick Session
+          </p>
+        </div>
+
+        {/* Circular Display with Big Digital Timer */}
+        <div className="relative my-4 flex items-center justify-center">
+          {/* Animated Glow Halo */}
+          <div
+            className={`absolute w-64 h-64 rounded-full transition-all duration-700 pointer-events-none ${
+              session.isPaused
+                ? 'bg-amber-500/10 scale-95'
+                : 'bg-blue-500/15 scale-105 animate-pulse'
+            }`}
+          />
+          <div className="w-60 h-60 rounded-full border-4 border-slate-800 bg-slate-900/90 shadow-2xl flex flex-col items-center justify-center relative p-6">
+            <span className="text-[10px] font-extrabold tracking-widest uppercase text-blue-400 mb-1">
+              Elapsed Time
+            </span>
+
+            {/* Digital Numbers */}
+            <div className="flex items-baseline font-mono text-white tracking-tight">
+              {hours && (
+                <>
+                  <span className="text-4xl font-black">{hours}</span>
+                  <span className="text-2xl font-bold text-slate-500 mx-1">:</span>
+                </>
+              )}
+              <span className="text-5xl font-black">{minutes}</span>
+              <span className="text-3xl font-bold text-slate-500 mx-1">:</span>
+              <span className="text-5xl font-black">{seconds}</span>
+            </div>
+
+            {/* Status Subtext */}
+            <span className="mt-2 text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300">
+              {session.isPaused ? 'Paused' : 'Recording...'}
+            </span>
+
+            {/* Estimated Stats Pill */}
+            <div className="mt-3 flex items-center gap-1.5 text-xs text-amber-300 font-semibold bg-amber-500/10 border border-amber-500/20 px-3 py-1 rounded-full">
+              <Flame className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+              <span>~{estCalories} kcal burned</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Metrics Bar */}
+        <div className="w-full grid grid-cols-3 gap-2 bg-slate-900/80 border border-slate-800 rounded-2xl p-3 text-center">
+          <div>
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Duration</p>
+            <p className="text-base font-extrabold text-white mt-0.5">
+              {durationMinutes} <span className="text-xs font-normal text-slate-400">min</span>
+            </p>
+          </div>
+          <div className="border-x border-slate-800">
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Est. Calories</p>
+            <p className="text-base font-extrabold text-amber-400 mt-0.5">
+              {estCalories} <span className="text-xs font-normal text-slate-400">kcal</span>
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Laps</p>
+            <p className="text-base font-extrabold text-sky-400 mt-0.5">
+              {session.laps.length}
+            </p>
+          </div>
+        </div>
+
+        {/* Recorded Laps Mini List (if any) */}
+        {session.laps.length > 0 && (
+          <div className="w-full mt-3 max-h-24 overflow-y-auto bg-slate-900/50 rounded-xl p-2 border border-slate-800 space-y-1 text-xs">
+            {session.laps.slice().reverse().map((lap) => (
+              <div key={lap.lapNumber} className="flex items-center justify-between text-slate-300 px-2 py-0.5">
+                <span className="font-semibold text-slate-400">Lap {lap.lapNumber}</span>
+                <span className="font-mono">{formatStopwatch(lap.splitSeconds).formatted}</span>
+                <span className="font-mono text-slate-500">+{formatStopwatch(lap.timeSeconds).formatted}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Bottom Control Buttons */}
+        <div className="w-full space-y-3 pt-4">
+          <div className="flex items-center justify-center gap-4">
+            {/* Lap Button */}
+            <button
+              onClick={onRecordLap}
+              disabled={session.isPaused}
+              className={`w-14 h-14 rounded-2xl flex flex-col items-center justify-center gap-0.5 transition-all ${
+                session.isPaused
+                  ? 'bg-slate-800/40 text-slate-600 cursor-not-allowed'
+                  : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-300 cursor-pointer shadow-md'
+              }`}
+            >
+              <Flag className="w-5 h-5" />
+              <span className="text-[9px] font-bold uppercase">Lap</span>
+            </button>
+
+            {/* Play / Pause Primary Button */}
+            <button
+              id="workout-pause-resume-btn"
+              onClick={onTogglePause}
+              className={`w-20 h-20 rounded-3xl flex flex-col items-center justify-center gap-1 font-bold text-white shadow-xl active:scale-95 transition-all cursor-pointer ${
+                session.isPaused
+                  ? 'bg-gradient-to-tr from-emerald-600 to-teal-500 shadow-emerald-500/30'
+                  : 'bg-gradient-to-tr from-amber-500 to-orange-500 shadow-amber-500/30'
+              }`}
+            >
+              {session.isPaused ? (
+                <>
+                  <Play className="w-7 h-7 fill-white translate-x-0.5" />
+                  <span className="text-[10px] uppercase tracking-wider">Resume</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="w-7 h-7 fill-white" />
+                  <span className="text-[10px] uppercase tracking-wider">Pause</span>
+                </>
+              )}
+            </button>
+
+            {/* Finish Workout Button */}
+            <button
+              id="workout-finish-btn"
+              onClick={() => setShowFinishConfirm(true)}
+              className="w-14 h-14 rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-95 text-white flex flex-col items-center justify-center gap-0.5 shadow-md shadow-blue-500/20 cursor-pointer transition-all"
+            >
+              <Square className="w-5 h-5 fill-white" />
+              <span className="text-[9px] font-bold uppercase">Finish</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Finish & Save Confirmation Dialog */}
+      {showFinishConfirm && (
+        <div className="absolute inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-3xl p-5 shadow-2xl text-white space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                <Check className="w-6 h-6 stroke-[2.5]" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold">Complete Workout?</h3>
+                <p className="text-xs text-slate-400">Ready to record and log this session</p>
+              </div>
+            </div>
+
+            {/* Workout Summary Card */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-2xl p-3 space-y-2 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 font-medium">Activity</span>
+                <span className="font-bold text-white flex items-center gap-1">
+                  {getActivityIcon(session.activityName)}
+                  <span>{session.activityName}</span>
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 font-medium">Duration</span>
+                <span className="font-bold text-emerald-400 font-mono">
+                  {formatStopwatch(session.secondsElapsed).formatted} ({durationMinutes} mins)
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 font-medium">Est. Calories</span>
+                <span className="font-bold text-amber-300">~{estCalories} kcal</span>
+              </div>
+            </div>
+
+            {/* Optional Notes Input */}
+            <div>
+              <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                Workout Notes (Optional)
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Great pace, felt strong!"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={handleFinishSave}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 active:scale-95 text-white font-bold text-xs shadow-md shadow-blue-500/20 cursor-pointer transition-all flex items-center justify-center gap-1.5"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Save to Activities</span>
+              </button>
+              <button
+                onClick={() => setShowFinishConfirm(false)}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-colors cursor-pointer"
+              >
+                Keep Going
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Discard Confirmation Dialog */}
+      {showDiscardConfirm && (
+        <div className="absolute inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-3xl p-5 shadow-2xl text-white space-y-4">
+            <h3 className="text-base font-bold text-rose-400">Discard Workout?</h3>
+            <p className="text-xs text-slate-300">
+              Are you sure you want to stop and discard this session? The elapsed time ({formatStopwatch(session.secondsElapsed).formatted}) will not be saved.
+            </p>
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={() => {
+                  setShowDiscardConfirm(false);
+                  onDiscard();
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs transition-colors cursor-pointer"
+              >
+                Yes, Discard
+              </button>
+              <button
+                onClick={() => setShowDiscardConfirm(false)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

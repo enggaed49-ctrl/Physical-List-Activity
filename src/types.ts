@@ -1,17 +1,18 @@
 export type ActivityStatus = 'Completed' | 'Ongoing' | 'Not Started';
 
-export type ActivityCategory = 
-  | 'Cardio' 
-  | 'Strength' 
-  | 'Flexibility' 
-  | 'Sports' 
-  | 'Recovery' 
+export type ActivityCategory =
+  | 'Cardio'
+  | 'Strength'
+  | 'Flexibility'
+  | 'Sports'
+  | 'Recovery'
   | 'Other';
 
 export interface Activity {
   id: string;
+  userId?: string;
   name: string;
-  date: string; // YYYY-MM-DD format for storage/picker
+  date: string; // YYYY-MM-DD format
   durationMinutes: number;
   status: ActivityStatus;
   category?: ActivityCategory | string;
@@ -19,9 +20,10 @@ export interface Activity {
   createdAt: number;
 }
 
-export type Screen = 
-  | 'welcome'
-  | 'home'
+export type Screen =
+  | 'login'
+  | 'signup'
+  | 'dashboard'
   | 'list'
   | 'add'
   | 'details'
@@ -29,18 +31,29 @@ export type Screen =
   | 'profile'
   | 'statistics';
 
-export type BottomNavTab = 'home' | 'add' | 'list' | 'profile';
+export type BottomNavTab = 'dashboard' | 'add' | 'list' | 'profile';
 
 export type ActivityFilter = 'All' | 'Completed' | 'Ongoing' | 'Not Started';
 
 export type StatPeriod = 'Weekly' | 'Monthly' | 'Yearly';
 
-export interface CloudSyncStatus {
-  connected: boolean;
-  tableExists: boolean;
-  projectId: string;
-  message: string;
-  mode: 'cloud' | 'local';
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  subtitle: string;
+  avatarUrl?: string;
+  presetAvatar?: string;
+  dailyGoalMinutes: number;
+  defaultActivity: string;
+  createdAt: number;
+}
+
+export interface UserProfile {
+  name: string;
+  subtitle: string;
+  avatarUrl?: string;
+  presetAvatar?: string;
 }
 
 export interface WorkoutLap {
@@ -56,11 +69,4 @@ export interface WorkoutSession {
   secondsElapsed: number;
   startedAt: number;
   laps: WorkoutLap[];
-}
-
-export interface UserProfile {
-  name: string;
-  subtitle: string;
-  avatarUrl?: string;
-  presetAvatar?: string;
 }

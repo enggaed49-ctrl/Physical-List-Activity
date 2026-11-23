@@ -1,18 +1,11 @@
-import React, { useState, useRef } from 'react';
-import { 
-  X, 
-  Camera, 
-  Upload, 
-  Trash2, 
-  User, 
-  Sparkles, 
-  Check, 
-  Flame, 
-  Zap, 
-  Heart, 
-  Trophy, 
-  Crown,
-  Dumbbell
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  X,
+  Camera,
+  Upload,
+  Trash2,
+  User,
+  Check,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 
@@ -20,7 +13,7 @@ interface EditProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: UserProfile;
-  onSave: (updated: UserProfile) => void;
+  onSave: (updated: UserProfile) => void | Promise<void>;
 }
 
 export const PRESET_AVATARS = [
@@ -34,19 +27,33 @@ export const PRESET_AVATARS = [
   { id: 'fire', label: 'Beast', bg: 'from-red-600 to-amber-500', icon: '🔥' },
 ];
 
+const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']);
+const MAX_UPLOAD_BYTES = 1.5 * 1024 * 1024; // 1.5 MB raw (~2 MB base64, within server 2.5 MB limit)
+
 export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   isOpen,
   onClose,
   profile,
   onSave,
 }) => {
-  const [name, setName] = useState(profile.name || 'Guest User');
+  const [name, setName] = useState(profile.name || '');
   const [subtitle, setSubtitle] = useState(profile.subtitle || 'Stay active, stay healthy!');
   const [avatarUrl, setAvatarUrl] = useState<string | undefined>(profile.avatarUrl);
   const [selectedPreset, setSelectedPreset] = useState<string | undefined>(profile.presetAvatar);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setName(profile.name || '');
+      setSubtitle(profile.subtitle || 'Stay active, stay healthy!');
+      setAvatarUrl(profile.avatarUrl);
+      setSelectedPreset(profile.presetAvatar);
+      setErrorMsg(null);
+    }
+  }, [isOpen, profile]);
 
   if (!isOpen) return null;
 
@@ -54,14 +61,13 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setErrorMsg('Please select a valid image file (JPG, PNG, WebP).');
+    if (!ALLOWED_IMAGE_TYPES.has(file.type.toLowerCase())) {
+      setErrorMsg('Please select a PNG, JPG, WebP, or GIF image.');
       return;
     }
 
-    // Limit to 4MB for localStorage comfort
-    if (file.size > 4 * 1024 * 1024) {
-      setErrorMsg('Image size should be less than 4MB.');
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setErrorMsg('Image size must be 1.5 MB or less.');
       return;
     }
 
@@ -91,58 +97,62 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
     setAvatarUrl(undefined);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
-      setErrorMsg('Name cannot be empty.');
+      setErrorMsg('Display name cannot be empty.');
       return;
     }
 
-    onSave({
-      name: name.trim(),
-      subtitle: subtitle.trim() || 'Stay active, stay healthy!',
-      avatarUrl: avatarUrl || undefined,
-      presetAvatar: selectedPreset || undefined,
-    });
-    onClose();
+    setIsSaving(true);
+    try {
+      await onSave({
+        name: name.trim(),
+        subtitle: subtitle.trim() || 'Stay active, stay healthy!',
+        avatarUrl: avatarUrl || undefined,
+        presetAvatar: selectedPreset || undefined,
+      });
+      onClose();
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const activePresetObj = PRESET_AVATARS.find((p) => p.id === selectedPreset);
 
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="w-full max-w-sm max-h-[92%] bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-100 dark:border-slate-800 flex flex-col space-y-4 overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800 shrink-0">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
+      <div className="w-full max-w-md max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl p-5 sm:p-6 shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col space-y-4 overflow-hidden">
+        <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center">
               <User className="w-4 h-4 stroke-[2.2]" />
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-900 dark:text-white">Edit Profile</h3>
-              <p className="text-[11px] text-slate-400 dark:text-slate-400">Personalize your avatar and details</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Personalize your avatar and details</p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            aria-label="Close modal"
+            className="min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Scrollable Form Body */}
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto space-y-4 pr-1">
           {errorMsg && (
-            <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold">
+            <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 text-rose-700 dark:text-rose-300 text-xs font-semibold">
               {errorMsg}
             </div>
           )}
 
-          {/* Avatar Preview & Upload Actions */}
-          <div className="flex flex-col items-center justify-center pt-2">
-            <div className="relative group">
-              <div className="w-24 h-24 rounded-full overflow-hidden shadow-lg ring-4 ring-blue-100 dark:ring-slate-800 bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+          <div className="flex flex-col items-center justify-center pt-1">
+            <div className="relative">
+              <div className="w-24 h-24 rounded-full overflow-hidden shadow-md ring-4 ring-blue-50 dark:ring-slate-800 bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
                 {avatarUrl ? (
                   <img
                     src={avatarUrl}
@@ -150,44 +160,41 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                     className="w-full h-full object-cover"
                   />
                 ) : activePresetObj ? (
-                  <div className={`w-full h-full bg-gradient-to-tr ${activePresetObj.bg} flex items-center justify-center text-4xl shadow-inner`}>
+                  <div className={`w-full h-full bg-gradient-to-tr ${activePresetObj.bg} flex items-center justify-center text-4xl`}>
                     {activePresetObj.icon}
                   </div>
                 ) : (
-                  <div className="w-full h-full bg-gradient-to-tr from-blue-600 to-sky-400 text-white flex items-center justify-center">
-                    <User className="w-12 h-12 stroke-[1.8]" />
+                  <div className="w-full h-full bg-blue-600 text-white flex items-center justify-center">
+                    <User className="w-11 h-11 stroke-[1.8]" />
                   </div>
                 )}
               </div>
 
-              {/* Camera Trigger Badge */}
               <button
                 type="button"
                 id="modal-camera-btn"
                 onClick={() => fileInputRef.current?.click()}
-                className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-blue-600 hover:bg-blue-500 active:scale-95 text-white flex items-center justify-center shadow-md border-2 border-white dark:border-slate-900 cursor-pointer transition-all"
+                className="absolute -bottom-1 -right-1 w-10 h-10 rounded-full bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center shadow-md border-2 border-white dark:border-slate-900 cursor-pointer transition-colors"
                 title="Upload Photo"
               >
                 <Camera className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Hidden native file input */}
             <input
               type="file"
               ref={fileInputRef}
               onChange={handleFileUpload}
-              accept="image/*"
+              accept="image/png,image/jpeg,image/webp,image/gif"
               className="hidden"
             />
 
-            {/* Photo Action Buttons */}
-            <div className="flex items-center gap-2 mt-3">
+            <div className="flex items-center gap-2 mt-4">
               <button
                 type="button"
                 id="profile-upload-photo-btn"
                 onClick={() => fileInputRef.current?.click()}
-                className="px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900/60 text-blue-600 dark:text-blue-400 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900/60 text-blue-600 dark:text-blue-400 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span>{avatarUrl ? 'Change Photo' : 'Upload Photo'}</span>
@@ -198,7 +205,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                   type="button"
                   id="profile-remove-photo-btn"
                   onClick={handleRemovePhoto}
-                  className="px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-600 dark:text-rose-400 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-600 dark:text-rose-400 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Remove</span>
@@ -207,13 +214,12 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
             </div>
           </div>
 
-          {/* Preset Avatars Selection */}
-          <div className="space-y-1.5 pt-1">
+          <div className="space-y-2 pt-1">
             <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Or Pick a Fitness Avatar
               </label>
-              <span className="text-[10px] text-slate-400">8 sporty styles</span>
+              <span className="text-xs text-slate-400">8 styles</span>
             </div>
             <div className="grid grid-cols-4 gap-2">
               {PRESET_AVATARS.map((preset) => {
@@ -224,16 +230,16 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                     type="button"
                     id={`preset-avatar-${preset.id}`}
                     onClick={() => handleSelectPreset(preset.id)}
-                    className={`p-2 rounded-2xl flex flex-col items-center gap-1 border transition-all cursor-pointer ${
+                    className={`min-h-[68px] p-2 rounded-xl flex flex-col items-center justify-center gap-1 border transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-blue-50/80 dark:bg-blue-950/60 border-blue-500 dark:border-blue-400 shadow-xs scale-105'
-                        : 'bg-slate-50 dark:bg-slate-800/60 border-slate-100 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-500 dark:border-blue-400'
+                        : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
                     }`}
                   >
-                    <div className={`w-9 h-9 rounded-xl bg-gradient-to-tr ${preset.bg} flex items-center justify-center text-lg shadow-xs`}>
+                    <div className={`w-8 h-8 rounded-lg bg-gradient-to-tr ${preset.bg} flex items-center justify-center text-base`}>
                       {preset.icon}
                     </div>
-                    <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300 truncate max-w-full">
+                    <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 truncate max-w-full">
                       {preset.label}
                     </span>
                   </button>
@@ -242,9 +248,8 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
             </div>
           </div>
 
-          {/* Name Field */}
           <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+            <label htmlFor="profile-name-input" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
               Your Name
             </label>
             <input
@@ -253,13 +258,12 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Alex Morgan"
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+              className="w-full h-12 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
             />
           </div>
 
-          {/* Fitness Motto / Subtitle */}
           <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+            <label htmlFor="profile-subtitle-input" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
               Fitness Motto / Bio
             </label>
             <input
@@ -268,19 +272,19 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
               value={subtitle}
               onChange={(e) => setSubtitle(e.target.value)}
               placeholder="e.g. Every step counts toward a healthier you"
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+              className="w-full h-12 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
             />
           </div>
 
-          {/* Save Button */}
           <div className="pt-2">
             <button
               type="submit"
               id="save-profile-modal-btn"
-              className="w-full py-3 bg-blue-600 hover:bg-blue-700 active:scale-98 text-white font-bold text-xs rounded-xl shadow-md shadow-blue-500/25 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+              disabled={isSaving}
+              className="w-full min-h-[48px] py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold text-sm rounded-xl shadow-sm transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Check className="w-4 h-4 stroke-[2.5]" />
-              <span>Save Changes</span>
+              <span>{isSaving ? 'Saving...' : 'Save Changes'}</span>
             </button>
           </div>
         </form>

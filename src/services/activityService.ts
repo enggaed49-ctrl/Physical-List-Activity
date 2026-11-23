@@ -1,96 +1,73 @@
-import { Activity, CloudSyncStatus } from '../types';
-import { loadStoredActivities, saveStoredActivities, INITIAL_ACTIVITIES } from '../data/initialActivities';
+import { Activity } from '../types';
+import { getAccessToken, notifyUnauthorized } from './authTokenStore';
+
+function getAuthHeaders(withJson = false): Record<string, string> {
+  const token = getAccessToken();
+  const headers: Record<string, string> = {};
+  if (withJson) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
 
 export const activityService = {
-  // Check Supabase connection and table status
-  async getStatus(): Promise<CloudSyncStatus> {
+  async fetchActivities(): Promise<{ activities: Activity[]; error?: string }> {
+    const token = getAccessToken();
+    if (!token) {
+      notifyUnauthorized();
+      return { activities: [], error: 'Authentication required.' };
+    }
+
     try {
-      const res = await fetch('/api/status', {
-        headers: { 'Accept': 'application/json' },
+      const res = await fetch('/api/activities', {
+        headers: getAuthHeaders(),
       });
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { activities: [], error: 'Session expired. Please log in.' };
+      }
       if (res.ok) {
         const data = await res.json();
-        return {
-          connected: Boolean(data.connected),
-          tableExists: Boolean(data.tableExists),
-          projectId: data.projectId || 'kfgaxqydqswciypgydde',
-          message: data.message || '',
-          mode: data.connected && data.tableExists ? 'cloud' : 'local',
-        };
+        return { activities: Array.isArray(data.activities) ? data.activities : [] };
       }
+      const errData = await res.json().catch(() => ({}));
+      return { activities: [], error: errData.error || 'Failed to load activities.' };
     } catch {
-      // Offline or server not responding
+      return { activities: [], error: 'Network error loading activities.' };
     }
-
-    return {
-      connected: false,
-      tableExists: false,
-      projectId: 'kfgaxqydqswciypgydde',
-      message: 'Running in offline local storage mode.',
-      mode: 'local',
-    };
   },
 
-  // Fetch all activities: cloud first, local cache fallback
-  async fetchActivities(): Promise<{ activities: Activity[]; mode: 'cloud' | 'local'; error?: string }> {
-    try {
-      const res = await fetch('/api/activities');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.activities)) {
-          // If cloud has activities, sync into local storage as offline cache
-          if (data.activities.length > 0) {
-            saveStoredActivities(data.activities);
-            return { activities: data.activities, mode: 'cloud' };
-          } else {
-            // Cloud table is empty, seed with initial or local activities
-            const local = loadStoredActivities();
-            return { activities: local, mode: 'cloud' };
-          }
-        }
-      }
-    } catch {
-      // Fallback
-    }
-
-    const localData = loadStoredActivities();
-    return { activities: localData, mode: 'local' };
-  },
-
-  // Create activity
-  async createActivity(activityData: Omit<Activity, 'id' | 'createdAt'>): Promise<{ activity: Activity; mode: 'cloud' | 'local' }> {
+  async createActivity(
+    activityData: Omit<Activity, 'id' | 'createdAt' | 'userId'>
+  ): Promise<{ activity?: Activity; error?: string }> {
     try {
       const res = await fetch('/api/activities', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify(activityData),
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.activity) {
-          return { activity: data.activity, mode: 'cloud' };
-        }
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { error: 'Please log in to continue.' };
       }
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || 'Failed to save activity.' };
+      }
+      return { activity: data.activity };
     } catch {
-      // Cloud create failed, fall through to local
+      return { error: 'Network error while saving activity.' };
     }
-
-    // Local fallback
-    const localActivity: Activity = {
-      ...activityData,
-      id: `act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      createdAt: Date.now(),
-    };
-    return { activity: localActivity, mode: 'local' };
   },
 
-  // Update activity
-  async updateActivity(activity: Activity): Promise<{ activity: Activity; mode: 'cloud' | 'local' }> {
+  async updateActivity(activity: Activity): Promise<{ activity?: Activity; error?: string }> {
     try {
       const res = await fetch(`/api/activities/${encodeURIComponent(activity.id)}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           name: activity.name,
           date: activity.date,
@@ -100,56 +77,57 @@ export const activityService = {
           description: activity.description,
         }),
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.activity) {
-          return { activity: data.activity, mode: 'cloud' };
-        }
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { error: 'Please log in to continue.' };
       }
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || 'Failed to update activity.' };
+      }
+      return { activity: data.activity };
     } catch {
-      // Fallback
+      return { error: 'Network error while updating activity.' };
     }
-
-    return { activity, mode: 'local' };
   },
 
-  // Delete activity
-  async deleteActivity(id: string): Promise<{ success: boolean; mode: 'cloud' | 'local' }> {
+  async deleteActivity(id: string): Promise<{ success: boolean; error?: string }> {
     try {
       const res = await fetch(`/api/activities/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+        headers: getAuthHeaders(),
       });
-
-      if (res.ok) {
-        return { success: true, mode: 'cloud' };
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { success: false, error: 'Please log in to continue.' };
       }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        return { success: false, error: data.error || 'Failed to delete activity.' };
+      }
+      return { success: true };
     } catch {
-      // Fallback
+      return { success: false, error: 'Network error while deleting activity.' };
     }
-
-    return { success: true, mode: 'local' };
   },
 
-  // Seed sample activities to Supabase
-  async seedSampleData(): Promise<{ success: boolean; activities: Activity[] }> {
+  async seedSampleData(): Promise<{ activities?: Activity[]; error?: string }> {
     try {
       const res = await fetch('/api/activities/seed', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.activities) && data.activities.length > 0) {
-          saveStoredActivities(data.activities);
-          return { success: true, activities: data.activities };
-        }
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { error: 'Please log in to continue.' };
       }
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || 'Failed to load sample activities.' };
+      }
+      return { activities: Array.isArray(data.activities) ? data.activities : [] };
     } catch {
-      // Fallback
+      return { error: 'Network error loading sample activities.' };
     }
-
-    saveStoredActivities(INITIAL_ACTIVITIES);
-    return { success: true, activities: INITIAL_ACTIVITIES };
   },
 };

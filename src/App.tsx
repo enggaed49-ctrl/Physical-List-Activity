@@ -1,16 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import confetti from 'canvas-confetti';
-import { Activity, BottomNavTab, Screen, CloudSyncStatus, WorkoutSession, UserProfile } from './types';
-import { 
-  loadStoredActivities, 
-  saveStoredActivities, 
-  INITIAL_ACTIVITIES,
-  WELCOME_SEEN_KEY 
-} from './data/initialActivities';
+import {
+  Activity,
+  AuthUser,
+  BottomNavTab,
+  Screen,
+  UserProfile,
+  WorkoutSession,
+} from './types';
 import { activityService } from './services/activityService';
-import { AndroidFrame } from './components/AndroidFrame';
-import { BottomNavigation } from './components/BottomNavigation';
-import { WelcomeScreen } from './components/WelcomeScreen';
+import { authService } from './services/authService';
+import { setAccessToken, setUnauthorizedHandler } from './services/authTokenStore';
+import { AppShell } from './components/AppShell';
+import { AuthScreen } from './components/AuthScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { ActivityListScreen } from './components/ActivityListScreen';
 import { AddActivityScreen } from './components/AddActivityScreen';
@@ -21,159 +23,356 @@ import { StatisticsScreen } from './components/StatisticsScreen';
 import { DeleteConfirmDialog } from './components/DeleteConfirmDialog';
 import { SettingsModal } from './components/SettingsModal';
 import { AboutModal } from './components/AboutModal';
-import { SupabaseModal } from './components/SupabaseModal';
 import { ActiveWorkoutModal } from './components/ActiveWorkoutModal';
 import { FloatingMiniTimer } from './components/FloatingMiniTimer';
 import { detectCategoryFromName } from './utils/activityIcons';
 
+interface ParsedRoute {
+  screen: Screen;
+  activityId?: string;
+  isRoot?: boolean;
+  isUnknown?: boolean;
+}
+
+function parsePathname(pathname: string): ParsedRoute {
+  const clean = pathname.replace(/\/+$/, '') || '/';
+  if (clean === '/') return { screen: 'login', isRoot: true };
+  if (clean === '/login') return { screen: 'login' };
+  if (clean === '/signup') return { screen: 'signup' };
+  if (clean === '/dashboard') return { screen: 'dashboard' };
+  if (clean === '/activities') return { screen: 'list' };
+  if (clean === '/add') return { screen: 'add' };
+  if (clean === '/statistics') return { screen: 'statistics' };
+  if (clean === '/profile') return { screen: 'profile' };
+
+  const editMatch = clean.match(/^\/activities\/([^/]+)\/edit$/);
+  if (editMatch) {
+    return { screen: 'edit', activityId: decodeURIComponent(editMatch[1]) };
+  }
+
+  const detailMatch = clean.match(/^\/activities\/([^/]+)$/);
+  if (detailMatch) {
+    return { screen: 'details', activityId: decodeURIComponent(detailMatch[1]) };
+  }
+
+  return { screen: 'dashboard', isUnknown: true };
+}
+
+function routeToPath(screen: Screen, activityId?: string): string {
+  switch (screen) {
+    case 'login':
+      return '/login';
+    case 'signup':
+      return '/signup';
+    case 'dashboard':
+      return '/dashboard';
+    case 'list':
+      return '/activities';
+    case 'add':
+      return '/add';
+    case 'details':
+      return activityId ? `/activities/${encodeURIComponent(activityId)}` : '/activities';
+    case 'edit':
+      return activityId ? `/activities/${encodeURIComponent(activityId)}/edit` : '/activities';
+    case 'statistics':
+      return '/statistics';
+    case 'profile':
+      return '/profile';
+    default:
+      return '/dashboard';
+  }
+}
+
+function screenToTab(screen: Screen): BottomNavTab {
+  if (screen === 'add') return 'add';
+  if (screen === 'list' || screen === 'details' || screen === 'edit') return 'list';
+  if (screen === 'profile' || screen === 'statistics') return 'profile';
+  return 'dashboard';
+}
+
 export default function App() {
-  // Activity Storage State
-  const [activities, setActivities] = useState<Activity[]>(() => loadStoredActivities());
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [isLoadingActivities, setIsLoadingActivities] = useState(false);
 
-  // Cloud Sync State
-  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>({
-    connected: false,
-    tableExists: false,
-    projectId: 'kfgaxqydqswciypgydde',
-    message: 'Checking Supabase cloud connection...',
-    mode: 'local',
-  });
+  // Initial route evaluation with protected-route guard
+  const initialParsed = parsePathname(
+    typeof window !== 'undefined' ? window.location.pathname : '/login'
+  );
+  const initialIsProtected =
+    !initialParsed.isRoot &&
+    !initialParsed.isUnknown &&
+    initialParsed.screen !== 'login' &&
+    initialParsed.screen !== 'signup';
 
-  // Navigation States
   const [currentScreen, setCurrentScreen] = useState<Screen>(() => {
-    const seen = localStorage.getItem(WELCOME_SEEN_KEY);
-    return seen ? 'home' : 'welcome';
+    if (initialParsed.screen === 'signup') return 'signup';
+    return 'login';
   });
+  const [selectedActivityId, setSelectedActivityId] = useState<string | undefined>(
+    initialParsed.activityId
+  );
+  const [redirectAfterLogin, setRedirectAfterLogin] = useState<{
+    screen: Screen;
+    activityId?: string;
+  } | null>(() =>
+    initialIsProtected
+      ? { screen: initialParsed.screen, activityId: initialParsed.activityId }
+      : null
+  );
+  const [redirectNotice, setRedirectNotice] = useState<string | null>(() =>
+    initialIsProtected ? 'Please log in to view that page.' : null
+  );
 
-  const [activeTab, setActiveTab] = useState<BottomNavTab>('home');
-  const [selectedActivity, setSelectedActivity] = useState<Activity | null>(null);
-
-  // Modals & Dialogs State
+  // Modals & UI feedback
   const [deleteTarget, setDeleteTarget] = useState<Activity | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [isSupabaseOpen, setIsSupabaseOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
-  // Dark Mode State with LocalStorage Persistence
+  // Active Workout Timer Session
+  const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null);
+  const [isWorkoutModalOpen, setIsWorkoutModalOpen] = useState(false);
+  const [isWorkoutMinimized, setIsWorkoutMinimized] = useState(false);
+
+  // Dark Mode Preference
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('activity_tracker_dark_mode');
-      if (saved !== null) {
-        return saved === 'true';
-      }
-      return typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (saved !== null) return saved === 'true';
+      return (
+        typeof window !== 'undefined' &&
+        window.matchMedia &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches
+      );
     } catch {
       return false;
     }
   });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDarkMode);
+  }, [isDarkMode]);
 
   const handleToggleDarkMode = (enabled: boolean) => {
     setIsDarkMode(enabled);
     try {
       localStorage.setItem('activity_tracker_dark_mode', String(enabled));
     } catch {
-      // ignore
+      // ignore storage errors
     }
   };
 
-  // Quick Start Default Activity State (persisted)
-  const [defaultActivity, setDefaultActivity] = useState<string>(() => {
-    try {
-      return localStorage.getItem('quick_start_default_activity') || 'Running';
-    } catch {
-      return 'Running';
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
     }
-  });
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+    }, 3200);
+  }, []);
 
-  const handleSetDefaultActivity = (act: string) => {
-    setDefaultActivity(act);
-    try {
-      localStorage.setItem('quick_start_default_activity', act);
-    } catch {
-      // ignore
+  // Normalize initial URL on mount if unauthenticated user landed on protected or root URL
+  useEffect(() => {
+    if (!currentUser && window.location.pathname !== '/login' && window.location.pathname !== '/signup') {
+      window.history.replaceState({}, '', '/login');
     }
-    showToast(`Quick Start default set to ${act}`);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Daily Goal State (persisted, default: 60 mins)
-  const [dailyGoalMinutes, setDailyGoalMinutes] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('user_daily_goal_minutes');
-      if (saved) {
-        const val = parseInt(saved, 10);
-        if (!isNaN(val) && val > 0) return val;
+  // Navigation helper with auth protection
+  const navigateTo = useCallback(
+    (screen: Screen, options?: { activityId?: string; replace?: boolean; userOverride?: AuthUser | null }) => {
+      const authedUser = options?.userOverride !== undefined ? options.userOverride : currentUser;
+      const isAuthPage = screen === 'login' || screen === 'signup';
+
+      if (!authedUser && !isAuthPage) {
+        setRedirectAfterLogin({ screen, activityId: options?.activityId });
+        setRedirectNotice('Please log in to view that page.');
+        setCurrentScreen('login');
+        const method = options?.replace ? 'replaceState' : 'pushState';
+        window.history[method]({}, '', '/login');
+        return;
       }
-    } catch {
-      // ignore
-    }
-    return 60;
-  });
 
-  const handleSetDailyGoal = (mins: number) => {
-    setDailyGoalMinutes(mins);
-    try {
-      localStorage.setItem('user_daily_goal_minutes', String(mins));
-    } catch {
-      // ignore
-    }
-    showToast(`Daily goal set to ${mins} minutes!`);
-  };
+      if (authedUser && isAuthPage) {
+        setCurrentScreen('dashboard');
+        setSelectedActivityId(undefined);
+        window.history.replaceState({}, '', '/dashboard');
+        return;
+      }
 
-  // User Profile State (persisted)
-  const [userProfile, setUserProfile] = useState<UserProfile>(() => {
-    try {
-      const saved = localStorage.getItem('physical_list_user_profile_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed.name === 'string') {
-          return parsed;
+      setCurrentScreen(screen);
+      setSelectedActivityId(options?.activityId);
+      if (isAuthPage && screen === 'signup') {
+        setRedirectNotice(null);
+      }
+      const targetPath = routeToPath(screen, options?.activityId);
+      if (window.location.pathname !== targetPath) {
+        const method = options?.replace ? 'replaceState' : 'pushState';
+        window.history[method]({}, '', targetPath);
+      }
+    },
+    [currentUser]
+  );
+
+  // Browser Back/Forward listener with protected route enforcement
+  useEffect(() => {
+    const handlePopState = () => {
+      const parsed = parsePathname(window.location.pathname);
+      if (!currentUser) {
+        if (parsed.screen === 'login' || parsed.screen === 'signup') {
+          setCurrentScreen(parsed.screen);
+        } else {
+          if (!parsed.isRoot && !parsed.isUnknown) {
+            setRedirectAfterLogin({ screen: parsed.screen, activityId: parsed.activityId });
+            setRedirectNotice('Please log in to view that page.');
+          }
+          setCurrentScreen('login');
+          window.history.replaceState({}, '', '/login');
         }
+        return;
       }
-    } catch {
-      // ignore
-    }
-    return {
-      name: 'Guest User',
-      subtitle: 'Stay active, stay healthy!',
-    };
-  });
 
-  const handleUpdateProfile = (updated: UserProfile) => {
-    setUserProfile(updated);
+      if (parsed.isRoot || parsed.isUnknown || parsed.screen === 'login' || parsed.screen === 'signup') {
+        setCurrentScreen('dashboard');
+        setSelectedActivityId(undefined);
+        window.history.replaceState({}, '', '/dashboard');
+        return;
+      }
+
+      setCurrentScreen(parsed.screen);
+      setSelectedActivityId(parsed.activityId);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentUser]);
+
+  // Handle 401 session expiration from any API call
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAccessToken(null);
+      setCurrentUser(null);
+      setActivities([]);
+      setActiveSession(null);
+      setIsWorkoutModalOpen(false);
+      setIsWorkoutMinimized(false);
+      setDeleteTarget(null);
+      setIsSettingsOpen(false);
+      setIsAboutOpen(false);
+      setSelectedActivityId(undefined);
+      setRedirectNotice('Your session expired. Please log in again.');
+      setCurrentScreen('login');
+      window.history.replaceState({}, '', '/login');
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // Load current user's isolated activities
+  const loadUserActivities = useCallback(async () => {
+    setIsLoadingActivities(true);
     try {
-      localStorage.setItem('physical_list_user_profile_v1', JSON.stringify(updated));
-    } catch {
-      // ignore
+      const res = await activityService.fetchActivities();
+      if (res.error) {
+        showToast(res.error);
+      }
+      setActivities(res.activities);
+    } finally {
+      setIsLoadingActivities(false);
     }
-    showToast('Profile updated!');
+  }, [showToast]);
+
+  const handleAuthSuccess = async (user: AuthUser) => {
+    setCurrentUser(user);
+    setRedirectNotice(null);
+    const target = redirectAfterLogin;
+    setRedirectAfterLogin(null);
+
+    if (target && target.screen !== 'login' && target.screen !== 'signup') {
+      navigateTo(target.screen, {
+        activityId: target.activityId,
+        replace: true,
+        userOverride: user,
+      });
+    } else {
+      navigateTo('dashboard', { replace: true, userOverride: user });
+    }
+
+    await loadUserActivities();
+    showToast(`Welcome, ${user.name}!`);
   };
 
-  // Active Workout Session State
-  const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null);
-  const [isWorkoutModalOpen, setIsWorkoutModalOpen] = useState(false);
-  const [isWorkoutMinimized, setIsWorkoutMinimized] = useState(false);
+  const handleLogout = async () => {
+    await authService.logout();
+    setCurrentUser(null);
+    setActivities([]);
+    setActiveSession(null);
+    setIsWorkoutModalOpen(false);
+    setIsWorkoutMinimized(false);
+    setDeleteTarget(null);
+    setIsSettingsOpen(false);
+    setIsAboutOpen(false);
+    setSelectedActivityId(undefined);
+    setRedirectAfterLogin(null);
+    setRedirectNotice(null);
+    setCurrentScreen('login');
+    window.history.replaceState({}, '', '/login');
+    showToast('You have logged out.');
+  };
 
-  // Live Timer Interval Effect for Active Workout
+  // Profile & preferences persistence
+  const handleUpdateProfile = async (updated: UserProfile) => {
+    const res = await authService.updateProfile({
+      name: updated.name,
+      subtitle: updated.subtitle,
+      presetAvatar: updated.presetAvatar,
+      avatarUrl: updated.avatarUrl,
+    });
+    if (res.user) {
+      setCurrentUser(res.user);
+      showToast('Profile updated.');
+    } else if (res.error) {
+      showToast(res.error);
+    }
+  };
+
+  const handleSetDailyGoal = async (mins: number) => {
+    const res = await authService.updateProfile({ dailyGoalMinutes: mins });
+    if (res.user) {
+      setCurrentUser(res.user);
+      showToast(`Daily goal set to ${mins} minutes.`);
+    } else if (res.error) {
+      showToast(res.error);
+    }
+  };
+
+  const handleSetDefaultActivity = async (activityName: string) => {
+    const res = await authService.updateProfile({ defaultActivity: activityName });
+    if (res.user) {
+      setCurrentUser(res.user);
+      showToast(`Quick Start set to ${activityName}.`);
+    } else if (res.error) {
+      showToast(res.error);
+    }
+  };
+
+  // Live Workout Stopwatch Effect
   useEffect(() => {
     if (!activeSession || !activeSession.isActive || activeSession.isPaused) return;
-
-    const interval = setInterval(() => {
+    const interval = window.setInterval(() => {
       setActiveSession((prev) => {
         if (!prev || !prev.isActive || prev.isPaused) return prev;
-        return {
-          ...prev,
-          secondsElapsed: prev.secondsElapsed + 1,
-        };
+        return { ...prev, secondsElapsed: prev.secondsElapsed + 1 };
       });
     }, 1000);
-
-    return () => clearInterval(interval);
+    return () => window.clearInterval(interval);
   }, [activeSession?.isActive, activeSession?.isPaused]);
 
-  // Workout Session Action Handlers
   const handleStartQuickWorkout = (activityName?: string) => {
-    const chosen = activityName || defaultActivity;
+    const chosen = activityName || currentUser?.defaultActivity || 'Running';
     setActiveSession({
       isActive: true,
       isPaused: false,
@@ -184,48 +383,43 @@ export default function App() {
     });
     setIsWorkoutMinimized(false);
     setIsWorkoutModalOpen(true);
-    showToast(`Timer started for ${chosen}!`);
+    showToast(`Timer started for ${chosen}`);
   };
 
   const handleToggleWorkoutPause = () => {
-    setActiveSession((prev) => {
-      if (!prev) return null;
-      return { ...prev, isPaused: !prev.isPaused };
-    });
+    setActiveSession((prev) => (prev ? { ...prev, isPaused: !prev.isPaused } : null));
   };
 
   const handleRecordWorkoutLap = () => {
     setActiveSession((prev) => {
       if (!prev) return null;
-      const previousLapTime = prev.laps.length > 0 
-        ? prev.laps[prev.laps.length - 1].timeSeconds 
-        : 0;
+      const previousLapTime =
+        prev.laps.length > 0 ? prev.laps[prev.laps.length - 1].timeSeconds : 0;
       const splitSeconds = prev.secondsElapsed - previousLapTime;
-      const newLap = {
-        lapNumber: prev.laps.length + 1,
-        timeSeconds: prev.secondsElapsed,
-        splitSeconds,
-      };
       return {
         ...prev,
-        laps: [...prev.laps, newLap],
+        laps: [
+          ...prev.laps,
+          {
+            lapNumber: prev.laps.length + 1,
+            timeSeconds: prev.secondsElapsed,
+            splitSeconds,
+          },
+        ],
       };
     });
-    showToast('Lap recorded!');
+    showToast('Lap recorded');
   };
 
   const handleChangeWorkoutActivity = (newName: string) => {
-    setActiveSession((prev) => {
-      if (!prev) return null;
-      return { ...prev, activityName: newName };
-    });
+    setActiveSession((prev) => (prev ? { ...prev, activityName: newName } : null));
   };
 
   const handleFinishWorkout = async (notes?: string, customName?: string) => {
     if (!activeSession) return;
     const elapsedSecs = activeSession.secondsElapsed;
     const durationMinutes = Math.max(1, Math.round(elapsedSecs / 60));
-    const actName = customName || activeSession.activityName || defaultActivity;
+    const actName = customName || activeSession.activityName || 'Running';
     const cat = detectCategoryFromName(actName);
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -243,7 +437,9 @@ export default function App() {
       durationMinutes,
       status: 'Completed',
       category: cat,
-      description: notes || `Quick workout session completed (${Math.floor(elapsedSecs / 60)}m ${elapsedSecs % 60}s elapsed)`,
+      description:
+        notes ||
+        `Quick workout completed (${Math.floor(elapsedSecs / 60)}m ${elapsedSecs % 60}s)`,
     });
   };
 
@@ -263,326 +459,257 @@ export default function App() {
     setIsWorkoutMinimized((prev) => !prev);
   };
 
-  // Refresh status and sync activities
-  const refreshCloudStatus = useCallback(async () => {
-    const status = await activityService.getStatus();
-    setCloudStatus(status);
-    if (status.connected && status.tableExists) {
-      const res = await activityService.fetchActivities();
-      if (res.activities && res.activities.length > 0) {
-        setActivities(res.activities);
-      }
-    }
-  }, []);
-
-  // Initial fetch on mount
-  useEffect(() => {
-    refreshCloudStatus();
-  }, [refreshCloudStatus]);
-
-  // Sync state to LocalStorage whenever activities change
-  useEffect(() => {
-    saveStoredActivities(activities);
-  }, [activities]);
-
-  // Temporary toast notification helper
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage(null);
-    }, 3000);
-  };
-
-  // 1. Splash Screen Action
-  const handleGetStarted = () => {
-    localStorage.setItem(WELCOME_SEEN_KEY, 'true');
-    setCurrentScreen('home');
-    setActiveTab('home');
-  };
-
-  // 2. Bottom Navigation Tab Selection
-  const handleSelectTab = (tab: BottomNavTab) => {
-    setActiveTab(tab);
-    if (tab === 'home') {
-      setCurrentScreen('home');
-    } else if (tab === 'add') {
-      setCurrentScreen('add');
-    } else if (tab === 'list') {
-      setCurrentScreen('list');
-    } else if (tab === 'profile') {
-      setCurrentScreen('profile');
-    }
-  };
-
-  // 3. Create Activity (CRUD - CREATE)
-  const handleCreateActivity = async (data: Omit<Activity, 'id' | 'createdAt'>) => {
+  // CRUD Handlers
+  const handleCreateActivity = async (data: Omit<Activity, 'id' | 'createdAt' | 'userId'>) => {
     const res = await activityService.createActivity(data);
-    const newActivity = res.activity;
-
-    setActivities((prev) => [newActivity, ...prev]);
-    setSelectedActivity(newActivity);
-    setActiveTab('list');
-    setCurrentScreen('list');
-    showToast(res.mode === 'cloud' ? 'Activity saved to Supabase!' : 'Activity saved locally!');
-
-    // Trigger celebration confetti
-    try {
-      confetti({
-        particleCount: 50,
-        spread: 60,
-        origin: { y: 0.7 },
-      });
-    } catch {
-      // ignore
+    if (res.activity) {
+      setActivities((prev) => [res.activity!, ...prev]);
+      navigateTo('list');
+      showToast('Activity saved to your account.');
+      try {
+        confetti({
+          particleCount: 45,
+          spread: 55,
+          origin: { y: 0.7 },
+        });
+      } catch {
+        // ignore confetti error
+      }
+    } else if (res.error) {
+      showToast(res.error);
     }
   };
 
-  // 4. View Activity Details (CRUD - READ)
   const handleSelectActivity = (act: Activity) => {
-    setSelectedActivity(act);
-    setCurrentScreen('details');
-  };
-
-  // 5. Edit Activity (CRUD - UPDATE)
-  const handleStartEdit = () => {
-    if (selectedActivity) {
-      setCurrentScreen('edit');
-    }
+    navigateTo('details', { activityId: act.id });
   };
 
   const handleUpdateActivity = async (updated: Activity) => {
     const res = await activityService.updateActivity(updated);
-    setActivities((prev) =>
-      prev.map((act) => (act.id === res.activity.id ? res.activity : act))
-    );
-    setSelectedActivity(res.activity);
-    setCurrentScreen('details');
-    showToast(res.mode === 'cloud' ? 'Activity updated in Supabase!' : 'Activity updated locally!');
-  };
-
-  // 6. Delete Activity (CRUD - DELETE)
-  const handleDeleteRequest = () => {
-    if (selectedActivity) {
-      setDeleteTarget(selectedActivity);
+    if (res.activity) {
+      setActivities((prev) =>
+        prev.map((act) => (act.id === res.activity!.id ? res.activity! : act))
+      );
+      navigateTo('details', { activityId: res.activity.id });
+      showToast('Activity updated.');
+    } else if (res.error) {
+      showToast(res.error);
     }
   };
 
   const handleConfirmDelete = async () => {
-    if (deleteTarget) {
-      const targetId = deleteTarget.id;
-      await activityService.deleteActivity(targetId);
+    if (!deleteTarget) return;
+    const targetId = deleteTarget.id;
+    const res = await activityService.deleteActivity(targetId);
+    if (res.success) {
       setActivities((prev) => prev.filter((a) => a.id !== targetId));
       setDeleteTarget(null);
-      setSelectedActivity(null);
-      setCurrentScreen('list');
-      setActiveTab('list');
+      navigateTo('list', { replace: true });
       showToast('Activity deleted.');
+    } else {
+      setDeleteTarget(null);
+      showToast(res.error || 'Could not delete activity.');
     }
   };
 
-  // Reset to initial sample data
-  const handleResetSampleData = async () => {
+  const handleLoadSampleData = async () => {
     const res = await activityService.seedSampleData();
-    setActivities(res.activities);
-    showToast('Sample activities restored.');
+    if (res.activities) {
+      setActivities(res.activities);
+      showToast('Starter activities added to your account.');
+    } else if (res.error) {
+      showToast(res.error);
+    }
   };
 
-  // Check if bottom navigation should be visible on current screen
-  const shouldShowBottomNav = currentScreen !== 'welcome';
+  const selectedActivity = selectedActivityId
+    ? activities.find((a) => a.id === selectedActivityId) || null
+    : null;
+
+  // Recover gracefully if detail/edit URL targets a non-existent or unowned activity
+  useEffect(() => {
+    if (
+      currentUser &&
+      !isLoadingActivities &&
+      (currentScreen === 'details' || currentScreen === 'edit') &&
+      !selectedActivity
+    ) {
+      navigateTo('list', { replace: true });
+    }
+  }, [currentUser, isLoadingActivities, currentScreen, selectedActivity, navigateTo]);
+
+  const handleMobileBack = () => {
+    if (currentScreen === 'edit' && selectedActivity) {
+      navigateTo('details', { activityId: selectedActivity.id });
+    } else if (currentScreen === 'details') {
+      navigateTo('list');
+    } else if (currentScreen === 'statistics') {
+      navigateTo('profile');
+    } else {
+      navigateTo('dashboard');
+    }
+  };
 
   return (
-    <AndroidFrame activeScreenTitle="Physical List Activity System" isDarkMode={isDarkMode}>
-      {/* Toast Alert Banner */}
+    <>
+      {/* Global Toast Notification */}
       {toastMessage && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 bg-slate-900/90 text-white text-xs font-semibold px-4 py-2 rounded-full shadow-lg backdrop-blur-xs flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200">
-          <span className="w-2 h-2 rounded-full bg-blue-400"></span>
-          <span>{toastMessage}</span>
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 bg-slate-900 dark:bg-slate-800 text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-xl border border-slate-700 whitespace-nowrap"
+        >
+          {toastMessage}
         </div>
       )}
 
-      {/* Screen Views Container */}
-      <div className="flex-1 flex flex-col overflow-hidden relative">
-        {/* 1. Splash / Welcome Screen */}
-        {currentScreen === 'welcome' && (
-          <WelcomeScreen onGetStarted={handleGetStarted} />
-        )}
+      {!currentUser ? (
+        <AuthScreen
+          mode={currentScreen === 'signup' ? 'signup' : 'login'}
+          onSwitchMode={(mode) => navigateTo(mode)}
+          onAuthSuccess={handleAuthSuccess}
+          isDarkMode={isDarkMode}
+          onToggleDarkMode={handleToggleDarkMode}
+          redirectNotice={redirectNotice}
+        />
+      ) : (
+        <AppShell
+          user={currentUser}
+          currentScreen={currentScreen}
+          activeTab={screenToTab(currentScreen)}
+          isDarkMode={isDarkMode}
+          onToggleDarkMode={handleToggleDarkMode}
+          onNavigate={(screen) => navigateTo(screen)}
+          onBack={handleMobileBack}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onLogout={handleLogout}
+        >
+          {currentScreen === 'dashboard' && (
+            <HomeScreen
+              user={currentUser}
+              activities={activities}
+              isLoadingActivities={isLoadingActivities}
+              onSetDefaultActivity={handleSetDefaultActivity}
+              onOpenProfile={() => navigateTo('profile')}
+              activeSession={activeSession}
+              onStartQuickWorkout={handleStartQuickWorkout}
+              onResumeWorkout={handleResumeWorkout}
+              onViewAll={() => navigateTo('list')}
+              onSelectActivity={handleSelectActivity}
+              onAddNew={() => navigateTo('add')}
+              onLoadSampleData={handleLoadSampleData}
+            />
+          )}
 
-        {/* 2. Home / Dashboard Screen */}
-        {currentScreen === 'home' && (
-          <HomeScreen
-            activities={activities}
-            cloudStatus={cloudStatus}
-            userProfile={userProfile}
-            defaultActivity={defaultActivity}
+          {currentScreen === 'list' && (
+            <ActivityListScreen
+              activities={activities}
+              onSelectActivity={handleSelectActivity}
+              onAddNew={() => navigateTo('add')}
+              onLoadSampleData={handleLoadSampleData}
+            />
+          )}
+
+          {currentScreen === 'add' && (
+            <AddActivityScreen
+              onSave={handleCreateActivity}
+              onCancel={() => navigateTo('list')}
+            />
+          )}
+
+          {currentScreen === 'details' && selectedActivity && (
+            <ActivityDetailScreen
+              activity={selectedActivity}
+              onBack={() => navigateTo('list')}
+              onEdit={() => navigateTo('edit', { activityId: selectedActivity.id })}
+              onDeleteRequest={() => setDeleteTarget(selectedActivity)}
+            />
+          )}
+
+          {currentScreen === 'edit' && selectedActivity && (
+            <EditActivityScreen
+              activity={selectedActivity}
+              onUpdate={handleUpdateActivity}
+              onCancel={() => navigateTo('details', { activityId: selectedActivity.id })}
+            />
+          )}
+
+          {currentScreen === 'profile' && (
+            <ProfileScreen
+              user={currentUser}
+              activities={activities}
+              isDarkMode={isDarkMode}
+              onToggleDarkMode={handleToggleDarkMode}
+              onUpdateProfile={handleUpdateProfile}
+              onSetDailyGoal={handleSetDailyGoal}
+              onNavigateToActivities={() => navigateTo('list')}
+              onNavigateToStatistics={() => navigateTo('statistics')}
+              onOpenSettings={() => setIsSettingsOpen(true)}
+              onOpenAbout={() => setIsAboutOpen(true)}
+              onLogout={handleLogout}
+            />
+          )}
+
+          {currentScreen === 'statistics' && (
+            <StatisticsScreen
+              activities={activities}
+              onBack={() => navigateTo('profile')}
+            />
+          )}
+        </AppShell>
+      )}
+
+      {/* Global Overlays (authenticated workspace) */}
+      {currentUser && (
+        <>
+          <DeleteConfirmDialog
+            isOpen={deleteTarget !== null}
+            activityName={deleteTarget?.name || ''}
+            onConfirm={handleConfirmDelete}
+            onCancel={() => setDeleteTarget(null)}
+          />
+
+          {activeSession &&
+            activeSession.isActive &&
+            (isWorkoutMinimized || !isWorkoutModalOpen) && (
+              <FloatingMiniTimer
+                session={activeSession}
+                onTogglePause={handleToggleWorkoutPause}
+                onMaximize={handleResumeWorkout}
+                onFinishPrompt={handleResumeWorkout}
+              />
+            )}
+
+          <SettingsModal
+            isOpen={isSettingsOpen}
+            onClose={() => setIsSettingsOpen(false)}
+            onResetData={handleLoadSampleData}
+            isDarkMode={isDarkMode}
+            onToggleDarkMode={handleToggleDarkMode}
+            defaultActivity={currentUser.defaultActivity}
             onSetDefaultActivity={handleSetDefaultActivity}
-            dailyGoalMinutes={dailyGoalMinutes}
-            onOpenProfile={() => {
-              setActiveTab('profile');
-              setCurrentScreen('profile');
-            }}
-            activeSession={activeSession}
-            onStartQuickWorkout={handleStartQuickWorkout}
-            onResumeWorkout={handleResumeWorkout}
-            onOpenSupabase={() => setIsSupabaseOpen(true)}
-            onViewAll={() => {
-              setActiveTab('list');
-              setCurrentScreen('list');
-            }}
-            onSelectActivity={handleSelectActivity}
-            onAddNew={() => {
-              setActiveTab('add');
-              setCurrentScreen('add');
-            }}
           />
-        )}
 
-        {/* 3. Activity List Screen */}
-        {currentScreen === 'list' && (
-          <ActivityListScreen
-            activities={activities}
-            onSelectActivity={handleSelectActivity}
-            onAddNew={() => {
-              setActiveTab('add');
-              setCurrentScreen('add');
-            }}
+          <AboutModal
+            isOpen={isAboutOpen}
+            onClose={() => setIsAboutOpen(false)}
           />
-        )}
 
-        {/* 4. Add Activity Screen */}
-        {currentScreen === 'add' && (
-          <AddActivityScreen
-            onSave={handleCreateActivity}
-            onCancel={() => {
-              setActiveTab('list');
-              setCurrentScreen('list');
-            }}
-          />
-        )}
-
-        {/* 5. Activity Details Screen */}
-        {currentScreen === 'details' && selectedActivity && (
-          <ActivityDetailScreen
-            activity={selectedActivity}
-            onBack={() => {
-              setCurrentScreen(activeTab === 'home' ? 'home' : 'list');
-            }}
-            onEdit={handleStartEdit}
-            onDeleteRequest={handleDeleteRequest}
-          />
-        )}
-
-        {/* 6. Edit Activity Screen */}
-        {currentScreen === 'edit' && selectedActivity && (
-          <EditActivityScreen
-            activity={selectedActivity}
-            onUpdate={handleUpdateActivity}
-            onCancel={() => {
-              setCurrentScreen('details');
-            }}
-          />
-        )}
-
-        {/* 7. Profile Screen */}
-        {currentScreen === 'profile' && (
-          <ProfileScreen
-            activities={activities}
-            cloudStatus={cloudStatus}
-            userProfile={userProfile}
-            onUpdateProfile={handleUpdateProfile}
-            dailyGoalMinutes={dailyGoalMinutes}
-            onSetDailyGoal={handleSetDailyGoal}
-            onNavigateToActivities={() => {
-              setActiveTab('list');
-              setCurrentScreen('list');
-            }}
-            onNavigateToStatistics={() => {
-              setCurrentScreen('statistics');
-            }}
-            onOpenSettings={() => setIsSettingsOpen(true)}
-            onOpenAbout={() => setIsAboutOpen(true)}
-            onOpenWelcome={() => setCurrentScreen('welcome')}
-            onOpenSupabase={() => setIsSupabaseOpen(true)}
-          />
-        )}
-
-        {/* 8. Statistics Screen */}
-        {currentScreen === 'statistics' && (
-          <StatisticsScreen
-            activities={activities}
-            onBack={() => {
-              setCurrentScreen('profile');
-              setActiveTab('profile');
-            }}
-          />
-        )}
-      </div>
-
-      {/* Persistent Bottom Navigation Bar */}
-      {shouldShowBottomNav && (
-        <BottomNavigation
-          activeTab={activeTab}
-          onSelectTab={handleSelectTab}
-        />
+          {activeSession && (
+            <ActiveWorkoutModal
+              session={activeSession}
+              isOpen={isWorkoutModalOpen}
+              isMinimized={isWorkoutMinimized}
+              onTogglePause={handleToggleWorkoutPause}
+              onRecordLap={handleRecordWorkoutLap}
+              onFinish={handleFinishWorkout}
+              onDiscard={handleDiscardWorkout}
+              onToggleMinimize={handleToggleMinimize}
+              onChangeActivityName={handleChangeWorkoutActivity}
+            />
+          )}
+        </>
       )}
-
-      {/* Delete Confirmation Dialog */}
-      <DeleteConfirmDialog
-        isOpen={deleteTarget !== null}
-        activityName={deleteTarget?.name || ''}
-        onConfirm={handleConfirmDelete}
-        onCancel={() => setDeleteTarget(null)}
-      />
-
-      {/* Floating Mini Workout Timer when session active and minimized or browsing other screens */}
-      {activeSession && activeSession.isActive && (isWorkoutMinimized || !isWorkoutModalOpen) && (
-        <FloatingMiniTimer
-          session={activeSession}
-          onTogglePause={handleToggleWorkoutPause}
-          onMaximize={handleResumeWorkout}
-          onFinishPrompt={handleResumeWorkout}
-        />
-      )}
-
-      {/* Settings Modal */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        onResetData={handleResetSampleData}
-        isDarkMode={isDarkMode}
-        onToggleDarkMode={handleToggleDarkMode}
-        defaultActivity={defaultActivity}
-        onSetDefaultActivity={handleSetDefaultActivity}
-      />
-
-      {/* About Modal */}
-      <AboutModal
-        isOpen={isAboutOpen}
-        onClose={() => setIsAboutOpen(false)}
-      />
-
-      {/* Supabase Connection & SQL Modal */}
-      <SupabaseModal
-        isOpen={isSupabaseOpen}
-        onClose={() => setIsSupabaseOpen(false)}
-        status={cloudStatus}
-        onRefreshStatus={refreshCloudStatus}
-      />
-
-      {/* Active Workout Session Modal */}
-      {activeSession && (
-        <ActiveWorkoutModal
-          session={activeSession}
-          isOpen={isWorkoutModalOpen}
-          isMinimized={isWorkoutMinimized}
-          onTogglePause={handleToggleWorkoutPause}
-          onRecordLap={handleRecordWorkoutLap}
-          onFinish={handleFinishWorkout}
-          onDiscard={handleDiscardWorkout}
-          onToggleMinimize={handleToggleMinimize}
-          onChangeActivityName={handleChangeWorkoutActivity}
-        />
-      )}
-    </AndroidFrame>
+    </>
   );
 }
-

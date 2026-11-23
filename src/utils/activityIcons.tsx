@@ -6,14 +6,12 @@ import {
   Bike,
   Waves,
   HeartPulse,
-  Timer,
   Compass,
   Zap,
   Activity as ActivityIcon,
-  CircleDot,
   CheckCircle2,
   Clock,
-  CircleSlash,
+  CircleDashed,
 } from 'lucide-react';
 import { ActivityStatus } from '../types';
 
@@ -47,29 +45,26 @@ export function getActivityIcon(name: string): React.ReactNode {
   return <ActivityIcon className="w-5 h-5" />;
 }
 
-export function getStatusBadge(status: ActivityStatus) {
+export function getStatusMeta(status: ActivityStatus) {
   switch (status) {
     case 'Completed':
       return {
         label: 'Completed',
-        bg: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-        dot: 'bg-emerald-500',
-        icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+        textClass: 'text-emerald-700 dark:text-emerald-400',
+        icon: <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />,
       };
     case 'Ongoing':
       return {
         label: 'Ongoing',
-        bg: 'bg-blue-50 text-blue-700 border-blue-200',
-        dot: 'bg-blue-500',
-        icon: <Clock className="w-3.5 h-3.5" />,
+        textClass: 'text-blue-700 dark:text-blue-400',
+        icon: <Clock className="w-3.5 h-3.5 shrink-0" />,
       };
     case 'Not Started':
     default:
       return {
         label: 'Not Started',
-        bg: 'bg-amber-50 text-amber-700 border-amber-200',
-        dot: 'bg-amber-500',
-        icon: <CircleSlash className="w-3.5 h-3.5" />,
+        textClass: 'text-amber-700 dark:text-amber-400',
+        icon: <CircleDashed className="w-3.5 h-3.5 shrink-0" />,
       };
   }
 }
@@ -88,52 +83,23 @@ export function detectCategoryFromName(name: string): string {
   if (lower.includes('recover') || lower.includes('sauna') || lower.includes('rest') || lower.includes('massage')) {
     return 'Recovery';
   }
-  if (lower.includes('run') || lower.includes('cycl') || lower.includes('bike') || lower.includes('swim') || lower.includes('walk') || lower.includes('jog') || lower.includes('hiit') || lower.includes('cardio')) {
-    return 'Cardio';
-  }
   return 'Cardio';
 }
 
-export function getCategoryBadge(category?: string) {
+export function getCategoryColor(category?: string): string {
   const cat = category || 'Cardio';
   switch (cat) {
     case 'Cardio':
-      return {
-        label: 'Cardio',
-        bg: 'bg-orange-50 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800/80',
-        dot: 'bg-orange-500',
-      };
+      return 'text-orange-700 dark:text-orange-400';
     case 'Strength':
-      return {
-        label: 'Strength',
-        bg: 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/80',
-        dot: 'bg-indigo-500',
-      };
+      return 'text-indigo-700 dark:text-indigo-400';
     case 'Flexibility':
-      return {
-        label: 'Flexibility',
-        bg: 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800/80',
-        dot: 'bg-teal-500',
-      };
+      return 'text-teal-700 dark:text-teal-400';
     case 'Sports':
-      return {
-        label: 'Sports',
-        bg: 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/80',
-        dot: 'bg-amber-500',
-      };
+      return 'text-amber-700 dark:text-amber-400';
     case 'Recovery':
-      return {
-        label: 'Recovery',
-        bg: 'bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800/80',
-        dot: 'bg-sky-500',
-      };
-    case 'Other':
+      return 'text-sky-700 dark:text-sky-400';
     default:
-      return {
-        label: cat,
-        bg: 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700',
-        dot: 'bg-slate-400',
-      };
+      return 'text-slate-600 dark:text-slate-400';
   }
 }
-

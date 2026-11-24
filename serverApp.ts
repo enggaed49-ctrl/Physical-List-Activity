@@ -667,3 +667,12 @@ app.post('/api/activities/seed', requireAuth, async (req: AuthenticatedRequest, 
     return respondRouteError(res, err, 'Unable to load sample activities.');
   }
 });
+
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Unhandled API error:', err);
+  if (res.headersSent) return;
+  if (err instanceof DatabaseSetupError) {
+    return res.status(503).json({ error: err.message });
+  }
+  return res.status(500).json({ error: 'Internal server error. Please try again.' });
+});

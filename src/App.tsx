@@ -28,6 +28,7 @@ import { ActiveWorkoutModal } from './components/ActiveWorkoutModal';
 import { FloatingMiniTimer } from './components/FloatingMiniTimer';
 import { detectCategoryFromName } from './utils/activityIcons';
 import { getTodayLocalDateString } from './utils/formatters';
+import { pingSupabaseConnection } from './utils/supabaseDiagnostic';
 
 interface ParsedRoute {
   screen: Screen;
@@ -183,6 +184,15 @@ export default function App() {
       window.history.replaceState({}, '', '/login');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Run Supabase connectivity diagnostic on mount for immediate console feedback
+  useEffect(() => {
+    const controller = new AbortController();
+    void pingSupabaseConnection(controller.signal);
+    return () => {
+      controller.abort();
+    };
   }, []);
 
   // Navigation helper with auth protection

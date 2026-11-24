@@ -19,6 +19,30 @@ var DatabaseSetupError = class extends Error {
 };
 var cachedSupabase = null;
 var cachedEnvSignature = "";
+function stripWrappingQuotesAndSpaces(raw) {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('"') && cleaned.endsWith('"') || cleaned.startsWith("'") && cleaned.endsWith("'")) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+function normalizeSupabaseUrl(raw) {
+  let trimmed = stripWrappingQuotesAndSpaces(raw);
+  if (!trimmed) return "";
+  if (/^[a-z0-9]{16,32}$/i.test(trimmed)) {
+    return `https://${trimmed.toLowerCase()}.supabase.co`;
+  }
+  if (!/^[a-z]+:\/\//i.test(trimmed) && /^[a-z0-9.-]+\.supabase\.(co|in|net)(\/.*)?$/i.test(trimmed)) {
+    trimmed = `https://${trimmed}`;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const cleanedPath = parsed.pathname.replace(/\/(rest|auth|storage|graphql|realtime)\/v1\/?.*$/i, "").replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${cleanedPath}`;
+  } catch {
+    return trimmed.replace(/\/(rest|auth|storage|graphql|realtime)\/v1\/?.*$/i, "").replace(/\/+$/, "");
+  }
+}
 function isValidSupabaseUrl(raw) {
   try {
     const parsed = new URL(raw);
@@ -27,22 +51,108 @@ function isValidSupabaseUrl(raw) {
     return false;
   }
 }
-function isPublishableOrAnonKey(key) {
-  if (key.startsWith("sb_publishable_")) return true;
-  const parts = key.split(".");
-  if (parts.length === 3) {
-    try {
-      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
-      if (payload?.role === "anon") return true;
-    } catch {
-    }
+function extractSupabaseProjectRef(url) {
+  try {
+    const host = new URL(url).hostname;
+    const match = host.match(/^([a-z0-9-]+)\.supabase\.(co|in|net)$/i);
+    return match ? match[1].toLowerCase() : null;
+  } catch {
+    return null;
   }
-  return false;
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+  } catch {
+    return null;
+  }
+}
+function inspectServiceKey(url, serviceKey) {
+  if (!serviceKey) {
+    return { format: "missing", error: null };
+  }
+  if (serviceKey.startsWith("sb_publishable_")) {
+    return {
+      format: "anon",
+      error: "SUPABASE_SERVICE_ROLE_KEY is set to a publishable key (sb_publishable_...). Replace it with your secret service_role or sb_secret_... key."
+    };
+  }
+  if (serviceKey.startsWith("sbp_")) {
+    return {
+      format: "invalid",
+      error: "SUPABASE_SERVICE_ROLE_KEY is set to a Supabase Personal Access Token (sbp_...). Use your project service_role or Secret key from Project Settings -> API Keys instead."
+    };
+  }
+  const jwtPayload = decodeJwtPayload(serviceKey);
+  if (jwtPayload) {
+    const role = typeof jwtPayload.role === "string" ? jwtPayload.role : "";
+    if (role === "anon") {
+      return {
+        format: "anon",
+        error: "SUPABASE_SERVICE_ROLE_KEY is set to the public anon key. Replace it with your private service_role key."
+      };
+    }
+    const tokenRef = typeof jwtPayload.ref === "string" ? jwtPayload.ref.toLowerCase() : "";
+    const urlRef = extractSupabaseProjectRef(url);
+    if (tokenRef && urlRef && tokenRef !== urlRef) {
+      return {
+        format: "invalid",
+        error: `SUPABASE_SERVICE_ROLE_KEY belongs to project "${tokenRef}", which does not match SUPABASE_URL ("${urlRef}").`
+      };
+    }
+    if (role && role !== "service_role") {
+      return {
+        format: "invalid",
+        error: `SUPABASE_SERVICE_ROLE_KEY has JWT role "${role}" instead of "service_role".`
+      };
+    }
+    return { format: "jwt:service_role", error: null };
+  }
+  if (serviceKey.startsWith("sb_secret_")) {
+    if (serviceKey.length < 24) {
+      return {
+        format: "invalid",
+        error: "SUPABASE_SERVICE_ROLE_KEY looks truncated. Copy the complete sb_secret_... key from Project Settings -> API Keys."
+      };
+    }
+    return { format: "sb_secret", error: null };
+  }
+  if (extractSupabaseProjectRef(url)) {
+    return {
+      format: "invalid",
+      error: "SUPABASE_SERVICE_ROLE_KEY does not look like a valid Supabase service_role JWT (eyJ...) or Secret key (sb_secret_...). Make sure you did not paste the JWT Secret or a truncated value."
+    };
+  }
+  return serviceKey.length >= 20 ? { format: "sb_secret", error: null } : { format: "invalid", error: "SUPABASE_SERVICE_ROLE_KEY is too short to be a valid API key." };
 }
 function resolveSupabaseCredentials() {
-  const url = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || "").trim();
-  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SECRET || process.env.SUPABASE_KEY || "").trim();
-  return { url, serviceKey };
+  const urlCandidates = [
+    ["SUPABASE_URL", process.env.SUPABASE_URL],
+    ["SUPABASE_REST_URL", process.env.SUPABASE_REST_URL],
+    ["NEXT_PUBLIC_SUPABASE_URL", process.env.NEXT_PUBLIC_SUPABASE_URL],
+    ["VITE_SUPABASE_URL", process.env.VITE_SUPABASE_URL]
+  ];
+  const matchedUrl = urlCandidates.find(([, val]) => Boolean(val && stripWrappingQuotesAndSpaces(val)));
+  const keyCandidates = [
+    ["SUPABASE_SERVICE_ROLE_KEY", process.env.SUPABASE_SERVICE_ROLE_KEY],
+    ["SERVICE_KEY", process.env.SERVICE_KEY],
+    ["SUPABASE_SERVICE_ROLE", process.env.SUPABASE_SERVICE_ROLE],
+    ["SUPABASE_SERVICE_KEY", process.env.SUPABASE_SERVICE_KEY],
+    ["SUPABASE_SECRET_KEY", process.env.SUPABASE_SECRET_KEY],
+    ["SUPABASE_SECRET", process.env.SUPABASE_SECRET],
+    ["SUPABASE_KEY", process.env.SUPABASE_KEY]
+  ];
+  const matchedKey = keyCandidates.find(([, val]) => Boolean(val && stripWrappingQuotesAndSpaces(val)));
+  const url = matchedUrl ? normalizeSupabaseUrl(matchedUrl[1]) : "";
+  const serviceKey = matchedKey ? stripWrappingQuotesAndSpaces(matchedKey[1]) : "";
+  return {
+    url,
+    serviceKey,
+    urlSource: matchedUrl ? matchedUrl[0] : null,
+    keySource: matchedKey ? matchedKey[0] : null
+  };
 }
 function isLocalFallbackAllowed() {
   return process.env.ALLOW_LOCAL_FALLBACK === "true" && !process.env.VERCEL;
@@ -58,13 +168,12 @@ function getSupabaseClient() {
   }
   if (!isValidSupabaseUrl(url)) {
     throw new DatabaseSetupError(
-      "Invalid SUPABASE_URL format. Use your full https://...supabase.co project URL."
+      "Invalid SUPABASE_URL format. Use your https://...supabase.co project URL (or .../rest/v1/)."
     );
   }
-  if (isPublishableOrAnonKey(serviceKey)) {
-    throw new DatabaseSetupError(
-      "SUPABASE_SERVICE_ROLE_KEY is set to a public/anon key. Replace it with your Supabase service_role/secret key."
-    );
+  const keyInspection = inspectServiceKey(url, serviceKey);
+  if (keyInspection.error) {
+    throw new DatabaseSetupError(keyInspection.error);
   }
   cachedEnvSignature = signature;
   cachedSupabase = createClient(url, serviceKey, {
@@ -75,6 +184,172 @@ function getSupabaseClient() {
     }
   });
   return cachedSupabase;
+}
+async function verifySupabaseConnection(options) {
+  const shouldLog = options?.log ?? true;
+  const checkedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const { url, serviceKey, urlSource, keySource } = resolveSupabaseCredentials();
+  const urlLoaded = Boolean(url);
+  const keyLoaded = Boolean(serviceKey);
+  const keyInspection = inspectServiceKey(url, serviceKey);
+  const buildResult = (partial) => ({
+    ok: false,
+    urlLoaded,
+    keyLoaded,
+    urlSource,
+    keySource,
+    resolvedUrl: urlLoaded ? url : null,
+    keyFormat: keyInspection.format,
+    connectionActive: false,
+    authValid: false,
+    tablesReady: false,
+    missingTables: [],
+    error: null,
+    checkedAt,
+    ...partial
+  });
+  const logResult = (result) => {
+    if (!shouldLog) return result;
+    if (result.ok) {
+      console.info(
+        `[Supabase Diagnostic] Connected to ${result.resolvedUrl} (${result.urlSource} + ${result.keySource}, key=${result.keyFormat}, tablesReady=${result.tablesReady}).`
+      );
+    } else if (result.error) {
+      console.error(
+        `[Supabase Diagnostic] ${result.error} (urlLoaded=${result.urlLoaded}${result.urlSource ? ` [${result.urlSource}]` : ""}, keyLoaded=${result.keyLoaded}${result.keySource ? ` [${result.keySource}]` : ""}, keyFormat=${result.keyFormat}).`
+      );
+    }
+    return result;
+  };
+  if (!urlLoaded && !keyLoaded) {
+    return logResult(
+      buildResult({
+        error: "Supabase environment variables (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY / SERVICE_KEY) are not loaded."
+      })
+    );
+  }
+  if (!urlLoaded) {
+    return logResult(
+      buildResult({
+        error: "SUPABASE_URL is not loaded in environment variables."
+      })
+    );
+  }
+  if (!isValidSupabaseUrl(url)) {
+    return logResult(
+      buildResult({
+        error: `Invalid SUPABASE_URL format ("${url}"). Expected https://<project-ref>.supabase.co.`
+      })
+    );
+  }
+  if (!keyLoaded) {
+    return logResult(
+      buildResult({
+        error: "SUPABASE_SERVICE_ROLE_KEY (or SERVICE_KEY) is not loaded in environment variables."
+      })
+    );
+  }
+  if (keyInspection.error) {
+    return logResult(
+      buildResult({
+        error: keyInspection.error
+      })
+    );
+  }
+  try {
+    const restPing = await fetch(`${url}/rest/v1/`, {
+      method: "GET",
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`
+      },
+      signal: AbortSignal.timeout(6e3)
+    });
+    if (restPing.status === 401 || restPing.status === 403) {
+      let detail = `HTTP ${restPing.status}`;
+      try {
+        const body = await restPing.json();
+        if (body?.message) detail = body.message;
+      } catch {
+      }
+      return logResult(
+        buildResult({
+          connectionActive: true,
+          authValid: false,
+          error: `Supabase authentication failed against ${url}: ${detail}. Verify SUPABASE_SERVICE_ROLE_KEY uses your project's active service_role or sb_secret_ key.`
+        })
+      );
+    }
+    if (!restPing.ok && restPing.status >= 500) {
+      return logResult(
+        buildResult({
+          connectionActive: false,
+          error: `Supabase REST endpoint (${url}/rest/v1/) returned HTTP ${restPing.status}.`
+        })
+      );
+    }
+  } catch (err) {
+    return logResult(
+      buildResult({
+        connectionActive: false,
+        error: `Cannot reach Supabase URL (${url}): ${err.message}`
+      })
+    );
+  }
+  try {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return logResult(buildResult({ error: "Unable to initialize Supabase client." }));
+    }
+    const tableNames = ["users", "profiles", "user_logins", "activities"];
+    const [tableResults, authAdminResult] = await Promise.all([
+      Promise.all(tableNames.map((name) => supabase.from(name).select("id").limit(1))),
+      supabase.auth.admin.listUsers({ page: 1, perPage: 1 })
+    ]);
+    const authTableError = tableResults.find(
+      (r) => r.error && (r.error.code === "PGRST301" || r.error.message.toLowerCase().includes("invalid api key") || r.error.message.toLowerCase().includes("invalid jwt"))
+    );
+    if (authTableError?.error || authAdminResult.error) {
+      const msg = authTableError?.error?.message || authAdminResult.error?.message || "Authentication failed";
+      return logResult(
+        buildResult({
+          connectionActive: true,
+          authValid: false,
+          error: `Supabase authentication failed for ${url}: ${msg}. Check SUPABASE_SERVICE_ROLE_KEY.`
+        })
+      );
+    }
+    const missingTables = [];
+    tableResults.forEach((res, idx) => {
+      if (res.error) {
+        missingTables.push(tableNames[idx]);
+      }
+    });
+    const tablesReady = missingTables.length === 0;
+    const result = buildResult({
+      ok: true,
+      connectionActive: true,
+      authValid: true,
+      tablesReady,
+      missingTables,
+      error: tablesReady ? null : `Connected to Supabase, but missing tables: ${missingTables.join(", ")}. Run supabase/schema.sql in Supabase SQL Editor.`
+    });
+    if (shouldLog) {
+      if (tablesReady) {
+        logResult(result);
+      } else {
+        console.warn(`[Supabase Diagnostic] ${result.error}`);
+      }
+    }
+    return result;
+  } catch (err) {
+    return logResult(
+      buildResult({
+        connectionActive: true,
+        error: err instanceof Error ? err.message : "Supabase diagnostic check failed."
+      })
+    );
+  }
 }
 function requireSupabaseOrFallback() {
   const client = getSupabaseClient();
@@ -105,19 +380,20 @@ function isSupabaseConfigured() {
 function handleSupabaseError(error, context) {
   const code = error?.code || "";
   const msg = error?.message || "";
+  const lower = msg.toLowerCase();
   if (code === "PGRST205" || code === "42P01" || code === "42703" || msg.includes("Could not find the table") || msg.includes("does not exist")) {
     throw new DatabaseSetupError(
       "Database tables are not set up yet. Run supabase/schema.sql in your Supabase SQL Editor."
     );
   }
-  if (code === "42501" || msg.toLowerCase().includes("row-level security")) {
+  if (code === "42501" || lower.includes("row-level security")) {
     throw new DatabaseSetupError(
       "Supabase rejected the request due to Row Level Security. Ensure SUPABASE_SERVICE_ROLE_KEY uses your secret service_role key, not the anon/public key."
     );
   }
-  if (code === "PGRST301" || msg.toLowerCase().includes("invalid api key") || msg.toLowerCase().includes("jwt")) {
+  if (code === "PGRST301" || lower.includes("invalid api key") || lower.includes("no api key") || lower.includes("invalid jwt") || lower.includes("jwt expired") || lower.includes("jwserror")) {
     throw new DatabaseSetupError(
-      "Database credentials appear invalid. Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+      `Supabase rejected the API key (${msg || code || "Invalid credentials"}). Verify SUPABASE_URL matches your project and SUPABASE_SERVICE_ROLE_KEY is your secret service_role or sb_secret_ key (without quotes).`
     );
   }
   throw new Error(`${context}: ${msg || "Database request failed"}`);
@@ -259,8 +535,10 @@ async function findAuthUserIdByEmail(supabase, email) {
   const perPage = 200;
   while (page <= 10) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
-    if (error || !data?.users?.length) return null;
-    const match = data.users.find((u) => (u.email || "").toLowerCase() === target);
+    if (error || !data) return null;
+    const users = data.users || [];
+    if (!users.length) return null;
+    const match = users.find((u) => (u.email || "").toLowerCase() === target);
     if (match) return match.id;
     if (data.users.length < perPage) return null;
     page += 1;
@@ -725,6 +1003,11 @@ var db = {
 dotenv2.config();
 var app = express();
 app.use(express.json({ limit: "3mb" }));
+if (process.env.VERCEL && process.env.NODE_ENV !== "test") {
+  verifySupabaseConnection({ log: true }).catch((err) => {
+    console.error("[Supabase Diagnostic] Cold-start verification error:", err);
+  });
+}
 var SESSION_SECRET = process.env.SESSION_SECRET || crypto2.randomBytes(32).toString("hex");
 if (process.env.VERCEL && !process.env.SESSION_SECRET) {
   console.warn(
@@ -889,13 +1172,35 @@ async function requireAuth(req, res, next) {
 }
 app.get("/api/status", async (_req, res) => {
   try {
-    const health = await db.checkHealth();
+    const diagnostics = await verifySupabaseConnection({ log: false });
+    let storage = diagnostics.urlLoaded && diagnostics.keyLoaded ? "supabase" : "unconfigured";
+    let tablesReady = diagnostics.tablesReady;
+    if (!diagnostics.urlLoaded && !diagnostics.keyLoaded) {
+      const health = await db.checkHealth();
+      storage = health.storage;
+      tablesReady = health.tablesReady;
+    }
+    const isReady = storage === "supabase" && diagnostics.ok && diagnostics.tablesReady || storage === "local" && tablesReady;
     return res.json({
       ok: true,
-      status: health.storage === "supabase" && health.tablesReady ? "ready" : "needs_setup",
+      status: isReady ? "ready" : "needs_setup",
       version: "2.0.0",
-      storage: health.storage,
-      tablesReady: health.tablesReady
+      storage,
+      tablesReady,
+      ...diagnostics.error ? { message: diagnostics.error } : {},
+      diagnostics: {
+        urlLoaded: diagnostics.urlLoaded,
+        keyLoaded: diagnostics.keyLoaded,
+        urlSource: diagnostics.urlSource,
+        keySource: diagnostics.keySource,
+        resolvedUrl: diagnostics.resolvedUrl,
+        keyFormat: diagnostics.keyFormat,
+        connectionActive: diagnostics.connectionActive,
+        authValid: diagnostics.authValid,
+        missingTables: diagnostics.missingTables,
+        error: diagnostics.error,
+        checkedAt: diagnostics.checkedAt
+      }
     });
   } catch (err) {
     return res.json({

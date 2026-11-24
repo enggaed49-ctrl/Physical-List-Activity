@@ -2,13 +2,19 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { db, DatabaseSetupError, isSupabaseConfigured } from './db.ts';
+import { db, DatabaseSetupError, isSupabaseConfigured, verifySupabaseConnection } from './db.ts';
 import type { UserRecord, ActivityRecord } from './db.ts';
 
 dotenv.config();
 
 export const app = express();
 app.use(express.json({ limit: '3mb' }));
+
+if (process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+  verifySupabaseConnection({ log: true }).catch((err) => {
+    console.error('[Supabase Diagnostic] Cold-start verification error:', err);
+  });
+}
 
 // -------------------------------------------------------------
 // Security & Session Configuration
@@ -222,13 +228,40 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
 // -------------------------------------------------------------
 app.get('/api/status', async (_req, res) => {
   try {
-    const health = await db.checkHealth();
+    const diagnostics = await verifySupabaseConnection({ log: false });
+    let storage: 'supabase' | 'local' | 'unconfigured' = diagnostics.urlLoaded && diagnostics.keyLoaded ? 'supabase' : 'unconfigured';
+    let tablesReady = diagnostics.tablesReady;
+
+    if (!diagnostics.urlLoaded && !diagnostics.keyLoaded) {
+      const health = await db.checkHealth();
+      storage = health.storage;
+      tablesReady = health.tablesReady;
+    }
+
+    const isReady =
+      (storage === 'supabase' && diagnostics.ok && diagnostics.tablesReady) ||
+      (storage === 'local' && tablesReady);
+
     return res.json({
       ok: true,
-      status: health.storage === 'supabase' && health.tablesReady ? 'ready' : 'needs_setup',
+      status: isReady ? 'ready' : 'needs_setup',
       version: '2.0.0',
-      storage: health.storage,
-      tablesReady: health.tablesReady,
+      storage,
+      tablesReady,
+      ...(diagnostics.error ? { message: diagnostics.error } : {}),
+      diagnostics: {
+        urlLoaded: diagnostics.urlLoaded,
+        keyLoaded: diagnostics.keyLoaded,
+        urlSource: diagnostics.urlSource,
+        keySource: diagnostics.keySource,
+        resolvedUrl: diagnostics.resolvedUrl,
+        keyFormat: diagnostics.keyFormat,
+        connectionActive: diagnostics.connectionActive,
+        authValid: diagnostics.authValid,
+        missingTables: diagnostics.missingTables,
+        error: diagnostics.error,
+        checkedAt: diagnostics.checkedAt,
+      },
     });
   } catch (err) {
     return res.json({

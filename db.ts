@@ -83,6 +83,58 @@ export class DatabaseSetupError extends Error {
 let cachedSupabase: SupabaseClient | null = null;
 let cachedEnvSignature = '';
 
+export interface SupabaseDiagnosticResult {
+  ok: boolean;
+  urlLoaded: boolean;
+  keyLoaded: boolean;
+  urlSource: string | null;
+  keySource: string | null;
+  resolvedUrl: string | null;
+  keyFormat: 'jwt:service_role' | 'sb_secret' | 'anon' | 'invalid' | 'missing';
+  connectionActive: boolean;
+  authValid: boolean;
+  tablesReady: boolean;
+  missingTables: string[];
+  error: string | null;
+  checkedAt: string;
+}
+
+function stripWrappingQuotesAndSpaces(raw: string): string {
+  let cleaned = raw.trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+
+function normalizeSupabaseUrl(raw: string): string {
+  let trimmed = stripWrappingQuotesAndSpaces(raw);
+  if (!trimmed) return '';
+
+  if (/^[a-z0-9]{16,32}$/i.test(trimmed)) {
+    return `https://${trimmed.toLowerCase()}.supabase.co`;
+  }
+
+  if (!/^[a-z]+:\/\//i.test(trimmed) && /^[a-z0-9.-]+\.supabase\.(co|in|net)(\/.*)?$/i.test(trimmed)) {
+    trimmed = `https://${trimmed}`;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const cleanedPath = parsed.pathname
+      .replace(/\/(rest|auth|storage|graphql|realtime)\/v1\/?.*$/i, '')
+      .replace(/\/+$/, '');
+    return `${parsed.protocol}//${parsed.host}${cleanedPath}`;
+  } catch {
+    return trimmed
+      .replace(/\/(rest|auth|storage|graphql|realtime)\/v1\/?.*$/i, '')
+      .replace(/\/+$/, '');
+  }
+}
+
 function isValidSupabaseUrl(raw: string): boolean {
   try {
     const parsed = new URL(raw);
@@ -92,37 +144,137 @@ function isValidSupabaseUrl(raw: string): boolean {
   }
 }
 
-function isPublishableOrAnonKey(key: string): boolean {
-  if (key.startsWith('sb_publishable_')) return true;
-  const parts = key.split('.');
-  if (parts.length === 3) {
-    try {
-      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
-      if (payload?.role === 'anon') return true;
-    } catch {
-      // ignore decode errors
-    }
+function extractSupabaseProjectRef(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    const match = host.match(/^([a-z0-9-]+)\.supabase\.(co|in|net)$/i);
+    return match ? match[1].toLowerCase() : null;
+  } catch {
+    return null;
   }
-  return false;
 }
 
-function resolveSupabaseCredentials(): { url: string; serviceKey: string } {
-  const url = (
-    process.env.SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    process.env.VITE_SUPABASE_URL ||
-    ''
-  ).trim();
-  const serviceKey = (
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_SECRET_KEY ||
-    process.env.SUPABASE_SECRET ||
-    process.env.SUPABASE_KEY ||
-    ''
-  ).trim();
-  return { url, serviceKey };
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function inspectServiceKey(
+  url: string,
+  serviceKey: string
+): { format: SupabaseDiagnosticResult['keyFormat']; error: string | null } {
+  if (!serviceKey) {
+    return { format: 'missing', error: null };
+  }
+
+  if (serviceKey.startsWith('sb_publishable_')) {
+    return {
+      format: 'anon',
+      error:
+        'SUPABASE_SERVICE_ROLE_KEY is set to a publishable key (sb_publishable_...). Replace it with your secret service_role or sb_secret_... key.',
+    };
+  }
+
+  if (serviceKey.startsWith('sbp_')) {
+    return {
+      format: 'invalid',
+      error:
+        'SUPABASE_SERVICE_ROLE_KEY is set to a Supabase Personal Access Token (sbp_...). Use your project service_role or Secret key from Project Settings -> API Keys instead.',
+    };
+  }
+
+  const jwtPayload = decodeJwtPayload(serviceKey);
+  if (jwtPayload) {
+    const role = typeof jwtPayload.role === 'string' ? jwtPayload.role : '';
+    if (role === 'anon') {
+      return {
+        format: 'anon',
+        error:
+          'SUPABASE_SERVICE_ROLE_KEY is set to the public anon key. Replace it with your private service_role key.',
+      };
+    }
+
+    const tokenRef = typeof jwtPayload.ref === 'string' ? jwtPayload.ref.toLowerCase() : '';
+    const urlRef = extractSupabaseProjectRef(url);
+    if (tokenRef && urlRef && tokenRef !== urlRef) {
+      return {
+        format: 'invalid',
+        error: `SUPABASE_SERVICE_ROLE_KEY belongs to project "${tokenRef}", which does not match SUPABASE_URL ("${urlRef}").`,
+      };
+    }
+
+    if (role && role !== 'service_role') {
+      return {
+        format: 'invalid',
+        error: `SUPABASE_SERVICE_ROLE_KEY has JWT role "${role}" instead of "service_role".`,
+      };
+    }
+
+    return { format: 'jwt:service_role', error: null };
+  }
+
+  if (serviceKey.startsWith('sb_secret_')) {
+    if (serviceKey.length < 24) {
+      return {
+        format: 'invalid',
+        error: 'SUPABASE_SERVICE_ROLE_KEY looks truncated. Copy the complete sb_secret_... key from Project Settings -> API Keys.',
+      };
+    }
+    return { format: 'sb_secret', error: null };
+  }
+
+  if (extractSupabaseProjectRef(url)) {
+    return {
+      format: 'invalid',
+      error:
+        'SUPABASE_SERVICE_ROLE_KEY does not look like a valid Supabase service_role JWT (eyJ...) or Secret key (sb_secret_...). Make sure you did not paste the JWT Secret or a truncated value.',
+    };
+  }
+
+  return serviceKey.length >= 20
+    ? { format: 'sb_secret', error: null }
+    : { format: 'invalid', error: 'SUPABASE_SERVICE_ROLE_KEY is too short to be a valid API key.' };
+}
+
+function resolveSupabaseCredentials(): {
+  url: string;
+  serviceKey: string;
+  urlSource: string | null;
+  keySource: string | null;
+} {
+  const urlCandidates: Array<[string, string | undefined]> = [
+    ['SUPABASE_URL', process.env.SUPABASE_URL],
+    ['SUPABASE_REST_URL', process.env.SUPABASE_REST_URL],
+    ['NEXT_PUBLIC_SUPABASE_URL', process.env.NEXT_PUBLIC_SUPABASE_URL],
+    ['VITE_SUPABASE_URL', process.env.VITE_SUPABASE_URL],
+  ];
+  const matchedUrl = urlCandidates.find(([, val]) => Boolean(val && stripWrappingQuotesAndSpaces(val)));
+
+  const keyCandidates: Array<[string, string | undefined]> = [
+    ['SUPABASE_SERVICE_ROLE_KEY', process.env.SUPABASE_SERVICE_ROLE_KEY],
+    ['SERVICE_KEY', process.env.SERVICE_KEY],
+    ['SUPABASE_SERVICE_ROLE', process.env.SUPABASE_SERVICE_ROLE],
+    ['SUPABASE_SERVICE_KEY', process.env.SUPABASE_SERVICE_KEY],
+    ['SUPABASE_SECRET_KEY', process.env.SUPABASE_SECRET_KEY],
+    ['SUPABASE_SECRET', process.env.SUPABASE_SECRET],
+    ['SUPABASE_KEY', process.env.SUPABASE_KEY],
+  ];
+  const matchedKey = keyCandidates.find(([, val]) => Boolean(val && stripWrappingQuotesAndSpaces(val)));
+
+  const url = matchedUrl ? normalizeSupabaseUrl(matchedUrl[1]!) : '';
+  const serviceKey = matchedKey ? stripWrappingQuotesAndSpaces(matchedKey[1]!) : '';
+
+  return {
+    url,
+    serviceKey,
+    urlSource: matchedUrl ? matchedUrl[0] : null,
+    keySource: matchedKey ? matchedKey[0] : null,
+  };
 }
 
 function isLocalFallbackAllowed(): boolean {
@@ -143,14 +295,13 @@ export function getSupabaseClient(): SupabaseClient | null {
 
   if (!isValidSupabaseUrl(url)) {
     throw new DatabaseSetupError(
-      'Invalid SUPABASE_URL format. Use your full https://...supabase.co project URL.'
+      'Invalid SUPABASE_URL format. Use your https://...supabase.co project URL (or .../rest/v1/).'
     );
   }
 
-  if (isPublishableOrAnonKey(serviceKey)) {
-    throw new DatabaseSetupError(
-      'SUPABASE_SERVICE_ROLE_KEY is set to a public/anon key. Replace it with your Supabase service_role/secret key.'
-    );
+  const keyInspection = inspectServiceKey(url, serviceKey);
+  if (keyInspection.error) {
+    throw new DatabaseSetupError(keyInspection.error);
   }
 
   cachedEnvSignature = signature;
@@ -162,6 +313,203 @@ export function getSupabaseClient(): SupabaseClient | null {
     },
   });
   return cachedSupabase;
+}
+
+export async function verifySupabaseConnection(options?: { log?: boolean }): Promise<SupabaseDiagnosticResult> {
+  const shouldLog = options?.log ?? true;
+  const checkedAt = new Date().toISOString();
+  const { url, serviceKey, urlSource, keySource } = resolveSupabaseCredentials();
+  const urlLoaded = Boolean(url);
+  const keyLoaded = Boolean(serviceKey);
+  const keyInspection = inspectServiceKey(url, serviceKey);
+
+  const buildResult = (partial: Partial<SupabaseDiagnosticResult>): SupabaseDiagnosticResult => ({
+    ok: false,
+    urlLoaded,
+    keyLoaded,
+    urlSource,
+    keySource,
+    resolvedUrl: urlLoaded ? url : null,
+    keyFormat: keyInspection.format,
+    connectionActive: false,
+    authValid: false,
+    tablesReady: false,
+    missingTables: [],
+    error: null,
+    checkedAt,
+    ...partial,
+  });
+
+  const logResult = (result: SupabaseDiagnosticResult) => {
+    if (!shouldLog) return result;
+    if (result.ok) {
+      console.info(
+        `[Supabase Diagnostic] Connected to ${result.resolvedUrl} (${result.urlSource} + ${result.keySource}, key=${result.keyFormat}, tablesReady=${result.tablesReady}).`
+      );
+    } else if (result.error) {
+      console.error(
+        `[Supabase Diagnostic] ${result.error} (urlLoaded=${result.urlLoaded}${result.urlSource ? ` [${result.urlSource}]` : ''}, keyLoaded=${result.keyLoaded}${result.keySource ? ` [${result.keySource}]` : ''}, keyFormat=${result.keyFormat}).`
+      );
+    }
+    return result;
+  };
+
+  if (!urlLoaded && !keyLoaded) {
+    return logResult(
+      buildResult({
+        error:
+          'Supabase environment variables (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY / SERVICE_KEY) are not loaded.',
+      })
+    );
+  }
+
+  if (!urlLoaded) {
+    return logResult(
+      buildResult({
+        error: 'SUPABASE_URL is not loaded in environment variables.',
+      })
+    );
+  }
+
+  if (!isValidSupabaseUrl(url)) {
+    return logResult(
+      buildResult({
+        error: `Invalid SUPABASE_URL format ("${url}"). Expected https://<project-ref>.supabase.co.`,
+      })
+    );
+  }
+
+  if (!keyLoaded) {
+    return logResult(
+      buildResult({
+        error: 'SUPABASE_SERVICE_ROLE_KEY (or SERVICE_KEY) is not loaded in environment variables.',
+      })
+    );
+  }
+
+  if (keyInspection.error) {
+    return logResult(
+      buildResult({
+        error: keyInspection.error,
+      })
+    );
+  }
+
+  // 1. Direct REST endpoint ping & key authentication test
+  try {
+    const restPing = await fetch(`${url}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (restPing.status === 401 || restPing.status === 403) {
+      let detail = `HTTP ${restPing.status}`;
+      try {
+        const body = (await restPing.json()) as { message?: string; hint?: string };
+        if (body?.message) detail = body.message;
+      } catch {
+        // ignore JSON parse failure
+      }
+      return logResult(
+        buildResult({
+          connectionActive: true,
+          authValid: false,
+          error: `Supabase authentication failed against ${url}: ${detail}. Verify SUPABASE_SERVICE_ROLE_KEY uses your project's active service_role or sb_secret_ key.`,
+        })
+      );
+    }
+
+    if (!restPing.ok && restPing.status >= 500) {
+      return logResult(
+        buildResult({
+          connectionActive: false,
+          error: `Supabase REST endpoint (${url}/rest/v1/) returned HTTP ${restPing.status}.`,
+        })
+      );
+    }
+  } catch (err) {
+    return logResult(
+      buildResult({
+        connectionActive: false,
+        error: `Cannot reach Supabase URL (${url}): ${(err as Error).message}`,
+      })
+    );
+  }
+
+  // 2. Verify tables and Auth Admin API with @supabase/supabase-js client
+  try {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return logResult(buildResult({ error: 'Unable to initialize Supabase client.' }));
+    }
+
+    const tableNames = ['users', 'profiles', 'user_logins', 'activities'] as const;
+    const [tableResults, authAdminResult] = await Promise.all([
+      Promise.all(tableNames.map((name) => supabase.from(name).select('id').limit(1))),
+      supabase.auth.admin.listUsers({ page: 1, perPage: 1 }),
+    ]);
+
+    const authTableError = tableResults.find(
+      (r) =>
+        r.error &&
+        (r.error.code === 'PGRST301' ||
+          r.error.message.toLowerCase().includes('invalid api key') ||
+          r.error.message.toLowerCase().includes('invalid jwt'))
+    );
+
+    if (authTableError?.error || authAdminResult.error) {
+      const msg =
+        authTableError?.error?.message ||
+        authAdminResult.error?.message ||
+        'Authentication failed';
+      return logResult(
+        buildResult({
+          connectionActive: true,
+          authValid: false,
+          error: `Supabase authentication failed for ${url}: ${msg}. Check SUPABASE_SERVICE_ROLE_KEY.`,
+        })
+      );
+    }
+
+    const missingTables: string[] = [];
+    tableResults.forEach((res, idx) => {
+      if (res.error) {
+        missingTables.push(tableNames[idx]);
+      }
+    });
+
+    const tablesReady = missingTables.length === 0;
+    const result = buildResult({
+      ok: true,
+      connectionActive: true,
+      authValid: true,
+      tablesReady,
+      missingTables,
+      error: tablesReady
+        ? null
+        : `Connected to Supabase, but missing tables: ${missingTables.join(', ')}. Run supabase/schema.sql in Supabase SQL Editor.`,
+    });
+
+    if (shouldLog) {
+      if (tablesReady) {
+        logResult(result);
+      } else {
+        console.warn(`[Supabase Diagnostic] ${result.error}`);
+      }
+    }
+    return result;
+  } catch (err) {
+    return logResult(
+      buildResult({
+        connectionActive: true,
+        error: err instanceof Error ? err.message : 'Supabase diagnostic check failed.',
+      })
+    );
+  }
 }
 
 function requireSupabaseOrFallback(): SupabaseClient | null {
@@ -196,6 +544,7 @@ export function isSupabaseConfigured(): boolean {
 function handleSupabaseError(error: { code?: string; message?: string } | null, context: string): never {
   const code = error?.code || '';
   const msg = error?.message || '';
+  const lower = msg.toLowerCase();
   if (
     code === 'PGRST205' ||
     code === '42P01' ||
@@ -209,7 +558,7 @@ function handleSupabaseError(error: { code?: string; message?: string } | null, 
   }
   if (
     code === '42501' ||
-    msg.toLowerCase().includes('row-level security')
+    lower.includes('row-level security')
   ) {
     throw new DatabaseSetupError(
       'Supabase rejected the request due to Row Level Security. Ensure SUPABASE_SERVICE_ROLE_KEY uses your secret service_role key, not the anon/public key.'
@@ -217,11 +566,14 @@ function handleSupabaseError(error: { code?: string; message?: string } | null, 
   }
   if (
     code === 'PGRST301' ||
-    msg.toLowerCase().includes('invalid api key') ||
-    msg.toLowerCase().includes('jwt')
+    lower.includes('invalid api key') ||
+    lower.includes('no api key') ||
+    lower.includes('invalid jwt') ||
+    lower.includes('jwt expired') ||
+    lower.includes('jwserror')
   ) {
     throw new DatabaseSetupError(
-      'Database credentials appear invalid. Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
+      `Supabase rejected the API key (${msg || code || 'Invalid credentials'}). Verify SUPABASE_URL matches your project and SUPABASE_SERVICE_ROLE_KEY is your secret service_role or sb_secret_ key (without quotes).`
     );
   }
   throw new Error(`${context}: ${msg || 'Database request failed'}`);
@@ -422,8 +774,10 @@ async function findAuthUserIdByEmail(supabase: SupabaseClient, email: string): P
   const perPage = 200;
   while (page <= 10) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
-    if (error || !data?.users?.length) return null;
-    const match = data.users.find((u) => (u.email || '').toLowerCase() === target);
+    if (error || !data) return null;
+    const users = (data.users || []) as Array<{ id: string; email?: string }>;
+    if (!users.length) return null;
+    const match = users.find((u) => (u.email || '').toLowerCase() === target);
     if (match) return match.id;
     if (data.users.length < perPage) return null;
     page += 1;

@@ -1,10 +1,9 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import path from 'path';
-import os from 'os';
-import fs from 'fs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import { db, DatabaseSetupError } from './db.ts';
+import type { UserRecord, ActivityRecord } from './db.ts';
 
 dotenv.config();
 
@@ -23,37 +22,6 @@ if (process.env.VERCEL && !process.env.SESSION_SECRET) {
 
 const TOKEN_TTL_SECONDS = 60 * 60 * 24; // 24 hours
 
-interface UserRecord {
-  id: string;
-  email: string;
-  name: string;
-  subtitle: string;
-  presetAvatar?: string;
-  avatarUrl?: string;
-  dailyGoalMinutes: number;
-  defaultActivity: string;
-  passwordHash: string;
-  passwordSalt: string;
-  createdAt: number;
-}
-
-interface ActivityRecord {
-  id: string;
-  userId: string;
-  name: string;
-  date: string;
-  durationMinutes: number;
-  status: 'Completed' | 'Ongoing' | 'Not Started';
-  category: string;
-  description: string;
-  createdAt: number;
-}
-
-interface AppStoreData {
-  users: UserRecord[];
-  activities: ActivityRecord[];
-}
-
 interface AuthenticatedRequest extends Request {
   user?: UserRecord;
   tokenJti?: string;
@@ -70,68 +38,6 @@ function pruneRevokedTokens() {
     }
   }
 }
-
-// -------------------------------------------------------------
-// Atomic Persistent File Store (Per-User Isolated Data)
-// Uses /tmp on read-only serverless runtimes (e.g. Vercel)
-// -------------------------------------------------------------
-const DATA_DIR = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : process.env.VERCEL
-    ? path.join(os.tmpdir(), 'physical-list-data')
-    : path.resolve(process.cwd(), 'data');
-const STORE_PATH = path.join(DATA_DIR, 'app-store.json');
-
-let storeCache: AppStoreData | null = null;
-let writeQueue: Promise<void> = Promise.resolve();
-
-function loadStore(): AppStoreData {
-  if (storeCache) return storeCache;
-
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    }
-    if (fs.existsSync(STORE_PATH)) {
-      const raw = fs.readFileSync(STORE_PATH, 'utf-8');
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.activities)) {
-        storeCache = {
-          users: parsed.users,
-          activities: parsed.activities,
-        };
-        return storeCache;
-      }
-    }
-  } catch (err) {
-    console.warn('Could not read existing store, initializing clean store:', (err as Error).message);
-  }
-
-  storeCache = { users: [], activities: [] };
-  return storeCache;
-}
-
-function persistStore(data: AppStoreData): Promise<void> {
-  storeCache = data;
-  writeQueue = writeQueue
-    .then(async () => {
-      if (!fs.existsSync(DATA_DIR)) {
-        await fs.promises.mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
-      }
-      const tempPath = `${STORE_PATH}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-      await fs.promises.writeFile(tempPath, JSON.stringify(data, null, 2), {
-        encoding: 'utf-8',
-        mode: 0o600,
-      });
-      await fs.promises.rename(tempPath, STORE_PATH);
-    })
-    .catch((err) => {
-      console.error('Failed to persist store:', err);
-    });
-  return writeQueue;
-}
-
-loadStore();
 
 // -------------------------------------------------------------
 // Cryptography Helpers (scrypt Password Hashing + HMAC Tokens)
@@ -169,14 +75,15 @@ function fromBase64Url(input: string): string {
   return Buffer.from(padded, 'base64').toString('utf-8');
 }
 
-function signAuthToken(user: UserRecord): string {
+function signAuthToken(user: UserRecord): { token: string; jti: string } {
   const nowSec = Math.floor(Date.now() / 1000);
+  const jti = crypto.randomUUID();
   const header = toBase64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payload = toBase64Url(
     JSON.stringify({
       sub: user.id,
       email: user.email,
-      jti: crypto.randomUUID(),
+      jti,
       iat: nowSec,
       exp: nowSec + TOKEN_TTL_SECONDS,
     })
@@ -185,7 +92,7 @@ function signAuthToken(user: UserRecord): string {
   const signature = toBase64Url(
     crypto.createHmac('sha256', SESSION_SECRET).update(signingInput).digest()
   );
-  return `${signingInput}.${signature}`;
+  return { token: `${signingInput}.${signature}`, jti };
 }
 
 function verifyAuthToken(token: string): { sub: string; email: string; jti: string; exp: number } | null {
@@ -272,37 +179,65 @@ function inferCategory(name: string): string {
   return 'Cardio';
 }
 
+function respondRouteError(res: Response, err: unknown, fallbackMessage: string) {
+  if (err instanceof DatabaseSetupError) {
+    return res.status(503).json({ error: err.message });
+  }
+  console.error(fallbackMessage, err);
+  return res.status(500).json({ error: fallbackMessage });
+}
+
 // -------------------------------------------------------------
 // Auth Middleware
 // -------------------------------------------------------------
-function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization || '';
-  if (!authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authentication required. Please log in.' });
-  }
-  const token = authHeader.slice(7).trim();
-  const decoded = verifyAuthToken(token);
-  if (!decoded) {
-    return res.status(401).json({ error: 'Your session has expired or is invalid. Please log in again.' });
-  }
+async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  try {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required. Please log in.' });
+    }
+    const token = authHeader.slice(7).trim();
+    const decoded = verifyAuthToken(token);
+    if (!decoded) {
+      return res.status(401).json({ error: 'Your session has expired or is invalid. Please log in again.' });
+    }
 
-  const store = loadStore();
-  const user = store.users.find((u) => u.id === decoded.sub);
-  if (!user) {
-    return res.status(401).json({ error: 'Account not found. Please log in again.' });
-  }
+    const user = await db.findUserById(decoded.sub);
+    if (!user) {
+      return res.status(401).json({ error: 'Account not found. Please log in again.' });
+    }
 
-  req.user = user;
-  req.tokenJti = decoded.jti;
-  req.tokenExp = decoded.exp;
-  return next();
+    req.user = user;
+    req.tokenJti = decoded.jti;
+    req.tokenExp = decoded.exp;
+    return next();
+  } catch (err) {
+    return respondRouteError(res, err, 'Unable to verify session right now.');
+  }
 }
 
 // -------------------------------------------------------------
 // Health Route
 // -------------------------------------------------------------
-app.get('/api/status', (_req, res) => {
-  res.json({ ok: true, status: 'ready', version: '2.0.0' });
+app.get('/api/status', async (_req, res) => {
+  try {
+    const health = await db.checkHealth();
+    return res.json({
+      ok: true,
+      status: 'ready',
+      version: '2.0.0',
+      storage: health.storage,
+      tablesReady: health.tablesReady,
+    });
+  } catch {
+    return res.json({
+      ok: true,
+      status: 'ready',
+      version: '2.0.0',
+      storage: 'local',
+      tablesReady: false,
+    });
+  }
 });
 
 // -------------------------------------------------------------
@@ -338,8 +273,7 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
       return res.status(400).json({ error: firstError, fieldErrors });
     }
 
-    const store = loadStore();
-    const existing = store.users.find((u) => u.email === rawEmail);
+    const existing = await db.findUserByEmail(rawEmail);
     if (existing) {
       return res.status(409).json({
         error: 'An account with this email already exists.',
@@ -347,6 +281,7 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
       });
     }
 
+    const now = Date.now();
     const { salt, hash } = await hashPassword(rawPassword);
     const newUser: UserRecord = {
       id: `usr_${crypto.randomUUID()}`,
@@ -357,20 +292,30 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
       defaultActivity: 'Running',
       passwordHash: hash,
       passwordSalt: salt,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastLoginAt: now,
     };
 
-    const nextStore: AppStoreData = {
-      users: [...store.users, newUser],
-      activities: store.activities,
-    };
-    await persistStore(nextStore);
+    const savedUser = await db.createUser(newUser);
+    const { token, jti } = signAuthToken(savedUser);
+    const userAgent =
+      typeof req.headers['user-agent'] === 'string'
+        ? req.headers['user-agent'].slice(0, 200)
+        : undefined;
 
-    const token = signAuthToken(newUser);
-    return res.status(201).json({ token, user: sanitizeUser(newUser) });
+    await db.recordLogin({
+      id: `lgn_${crypto.randomUUID()}`,
+      userId: savedUser.id,
+      email: savedUser.email,
+      eventType: 'signup',
+      tokenJti: jti,
+      userAgent,
+      loggedInAt: now,
+    });
+
+    return res.status(201).json({ token, user: sanitizeUser(savedUser) });
   } catch (err) {
-    console.error('Signup error:', err);
-    return res.status(500).json({ error: 'Unable to create account right now. Please try again.' });
+    return respondRouteError(res, err, 'Unable to create account right now. Please try again.');
   }
 });
 
@@ -393,8 +338,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       return res.status(400).json({ error: Object.values(fieldErrors)[0], fieldErrors });
     }
 
-    const store = loadStore();
-    const user = store.users.find((u) => u.email === rawEmail);
+    const user = await db.findUserByEmail(rawEmail);
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
@@ -404,21 +348,44 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    const token = signAuthToken(user);
+    const loginTime = Date.now();
+    const { token, jti } = signAuthToken(user);
+    const userAgent =
+      typeof req.headers['user-agent'] === 'string'
+        ? req.headers['user-agent'].slice(0, 200)
+        : undefined;
+
+    await Promise.all([
+      db.updateLastLogin(user.id, loginTime),
+      db.recordLogin({
+        id: `lgn_${crypto.randomUUID()}`,
+        userId: user.id,
+        email: user.email,
+        eventType: 'login',
+        tokenJti: jti,
+        userAgent,
+        loggedInAt: loginTime,
+      }),
+    ]);
+
     return res.json({ token, user: sanitizeUser(user) });
   } catch (err) {
-    console.error('Login error:', err);
-    return res.status(500).json({ error: 'Unable to log in right now. Please try again.' });
+    return respondRouteError(res, err, 'Unable to log in right now. Please try again.');
   }
 });
 
-app.post('/api/auth/logout', (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/logout', async (req: AuthenticatedRequest, res: Response) => {
   const authHeader = req.headers.authorization || '';
   if (authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
     const decoded = verifyAuthToken(token);
     if (decoded?.jti && decoded?.exp) {
       revokedTokens.set(decoded.jti, decoded.exp);
+      try {
+        await db.markLogout(decoded.jti, Date.now());
+      } catch (err) {
+        console.warn('Could not persist logout timestamp:', (err as Error).message);
+      }
     }
   }
   return res.json({ success: true });
@@ -431,8 +398,7 @@ app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) 
 app.put('/api/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const store = loadStore();
-    const existing = store.users.find((u) => u.id === userId);
+    const existing = await db.findUserById(userId);
     if (!existing) {
       return res.status(404).json({ error: 'User not found.' });
     }
@@ -485,42 +451,36 @@ app.put('/api/profile', requireAuth, async (req: AuthenticatedRequest, res: Resp
       nextDefaultActivity = defaultActivity.trim().slice(0, 60);
     }
 
-    const updatedUser: UserRecord = {
-      ...existing,
+    const updatedUser = await db.updateUserProfile(userId, {
       name: nextName,
       subtitle: nextSubtitle,
       avatarUrl: nextAvatarUrl,
       presetAvatar: nextPresetAvatar,
       dailyGoalMinutes: nextDailyGoal,
       defaultActivity: nextDefaultActivity,
-    };
-
-    await persistStore({
-      users: store.users.map((u) => (u.id === userId ? updatedUser : u)),
-      activities: store.activities,
     });
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
 
     return res.json({ user: sanitizeUser(updatedUser) });
   } catch (err) {
-    console.error('Profile update error:', err);
-    return res.status(500).json({ error: 'Unable to update profile.' });
+    return respondRouteError(res, err, 'Unable to update profile.');
   }
 });
 
 // -------------------------------------------------------------
 // Protected Per-User Activity Routes
 // -------------------------------------------------------------
-app.get('/api/activities', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const userId = req.user!.id;
-  const store = loadStore();
-  const userActivities = store.activities
-    .filter((a) => a.userId === userId)
-    .sort((a, b) => {
-      const dateDiff = new Date(b.date).getTime() - new Date(a.date).getTime();
-      return dateDiff !== 0 ? dateDiff : b.createdAt - a.createdAt;
-    });
-
-  return res.json({ activities: userActivities });
+app.get('/api/activities', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const userActivities = await db.listActivitiesByUser(userId);
+    return res.json({ activities: userActivities });
+  } catch (err) {
+    return respondRouteError(res, err, 'Unable to load activities.');
+  }
 });
 
 app.post('/api/activities', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -554,16 +514,10 @@ app.post('/api/activities', requireAuth, async (req: AuthenticatedRequest, res: 
       createdAt: Date.now(),
     };
 
-    const store = loadStore();
-    await persistStore({
-      users: store.users,
-      activities: [newActivity, ...store.activities],
-    });
-
-    return res.status(201).json({ activity: newActivity });
+    const created = await db.createActivity(newActivity);
+    return res.status(201).json({ activity: created });
   } catch (err) {
-    console.error('Create activity error:', err);
-    return res.status(500).json({ error: 'Unable to save activity.' });
+    return respondRouteError(res, err, 'Unable to save activity.');
   }
 });
 
@@ -571,8 +525,7 @@ app.put('/api/activities/:id', requireAuth, async (req: AuthenticatedRequest, re
   try {
     const userId = req.user!.id;
     const { id } = req.params;
-    const store = loadStore();
-    const existing = store.activities.find((a) => a.id === id && a.userId === userId);
+    const existing = await db.findActivityByIdAndUser(id, userId);
 
     if (!existing) {
       return res.status(404).json({ error: 'Activity not found.' });
@@ -593,25 +546,22 @@ app.put('/api/activities/:id', requireAuth, async (req: AuthenticatedRequest, re
       }
     }
 
-    const updated: ActivityRecord = {
-      ...existing,
+    const updated = await db.updateActivity(id, userId, {
       ...(name !== undefined && { name: name.trim().slice(0, 100) }),
       ...(date !== undefined && { date }),
       ...(durationMinutes !== undefined && { durationMinutes: Math.round(Number(durationMinutes)) }),
       ...(status !== undefined && VALID_STATUSES.has(status) && { status }),
       ...(category !== undefined && VALID_CATEGORIES.has(category) && { category }),
       ...(description !== undefined && typeof description === 'string' && { description: description.trim().slice(0, 500) }),
-    };
-
-    await persistStore({
-      users: store.users,
-      activities: store.activities.map((a) => (a.id === id && a.userId === userId ? updated : a)),
     });
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Activity not found.' });
+    }
 
     return res.json({ activity: updated });
   } catch (err) {
-    console.error('Update activity error:', err);
-    return res.status(500).json({ error: 'Unable to update activity.' });
+    return respondRouteError(res, err, 'Unable to update activity.');
   }
 });
 
@@ -619,29 +569,21 @@ app.delete('/api/activities/:id', requireAuth, async (req: AuthenticatedRequest,
   try {
     const userId = req.user!.id;
     const { id } = req.params;
-    const store = loadStore();
-    const existing = store.activities.find((a) => a.id === id && a.userId === userId);
+    const deleted = await db.deleteActivity(id, userId);
 
-    if (!existing) {
+    if (!deleted) {
       return res.status(404).json({ error: 'Activity not found.' });
     }
 
-    await persistStore({
-      users: store.users,
-      activities: store.activities.filter((a) => !(a.id === id && a.userId === userId)),
-    });
-
     return res.json({ success: true });
   } catch (err) {
-    console.error('Delete activity error:', err);
-    return res.status(500).json({ error: 'Unable to delete activity.' });
+    return respondRouteError(res, err, 'Unable to delete activity.');
   }
 });
 
 app.post('/api/activities/seed', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const store = loadStore();
     const today = new Date();
     const formatOffsetDate = (daysAgo: number) => {
       const d = new Date(today.getTime() - daysAgo * 86400000);
@@ -693,17 +635,9 @@ app.post('/api/activities/seed', requireAuth, async (req: AuthenticatedRequest, 
       createdAt: Date.now() - idx * 1000,
     }));
 
-    const otherUsersActivities = store.activities.filter((a) => a.userId !== userId);
-    const nextActivities = [...created, ...otherUsersActivities];
-
-    await persistStore({
-      users: store.users,
-      activities: nextActivities,
-    });
-
-    return res.json({ activities: created });
+    const inserted = await db.replaceUserActivities(userId, created);
+    return res.json({ activities: inserted });
   } catch (err) {
-    console.error('Seed activities error:', err);
-    return res.status(500).json({ error: 'Unable to load sample activities.' });
+    return respondRouteError(res, err, 'Unable to load sample activities.');
   }
 });

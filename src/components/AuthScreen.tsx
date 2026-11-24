@@ -285,7 +285,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                             setFieldErrors((prev) => ({ ...prev, name: '' }));
                           }
                         }}
-                        placeholder="Alex Morgan"
+                        placeholder=""
                         className={`w-full h-12 pl-10 pr-4 rounded-xl border text-base sm:text-sm bg-slate-50 dark:bg-slate-800/80 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 transition-colors ${
                           fieldErrors.name
                             ? 'border-rose-500 focus:ring-rose-500/20'

@@ -53,7 +53,7 @@ export const activityService = {
         notifyUnauthorized();
         return { error: 'Please log in to continue.' };
       }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         return { error: data.error || 'Failed to save activity.' };
       }
@@ -81,7 +81,7 @@ export const activityService = {
         notifyUnauthorized();
         return { error: 'Please log in to continue.' };
       }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         return { error: data.error || 'Failed to update activity.' };
       }
@@ -121,7 +121,7 @@ export const activityService = {
         notifyUnauthorized();
         return { error: 'Please log in to continue.' };
       }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         return { error: data.error || 'Failed to load sample activities.' };
       }

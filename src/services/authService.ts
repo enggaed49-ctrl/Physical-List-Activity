@@ -24,9 +24,9 @@ export const authService = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { error: data.error || 'Could not create account.', fieldErrors: data.fieldErrors };
+        return { error: data.error || `Could not create account (HTTP ${res.status}).`, fieldErrors: data.fieldErrors };
       }
       if (data.token && data.user) {
         setAccessToken(data.token);
@@ -45,9 +45,9 @@ export const authService = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { error: data.error || 'Invalid email or password.', fieldErrors: data.fieldErrors };
+        return { error: data.error || `Could not sign in (HTTP ${res.status}).`, fieldErrors: data.fieldErrors };
       }
       if (data.token && data.user) {
         setAccessToken(data.token);
@@ -93,9 +93,9 @@ export const authService = {
         notifyUnauthorized();
         return { error: 'Session expired. Please log in again.' };
       }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { error: data.error || 'Could not update profile.' };
+        return { error: data.error || `Could not update profile (HTTP ${res.status}).` };
       }
       return { user: data.user };
     } catch {
@@ -116,9 +116,9 @@ export const authService = {
         notifyUnauthorized();
         return { logins: [], error: 'Session expired. Please log in again.' };
       }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { logins: [], error: data.error || 'Could not load sign-in history.' };
+        return { logins: [], error: data.error || `Could not load sign-in history (HTTP ${res.status}).` };
       }
       return { logins: Array.isArray(data.logins) ? data.logins : [] };
     } catch {

@@ -97,8 +97,11 @@ function resolveSupabaseCredentials(): { url: string; serviceKey: string } {
   ).trim();
   const serviceKey = (
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE ||
     process.env.SUPABASE_SERVICE_KEY ||
     process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SECRET ||
+    process.env.SUPABASE_KEY ||
     ''
   ).trim();
   return { url, serviceKey };

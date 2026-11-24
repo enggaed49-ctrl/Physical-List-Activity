@@ -13,7 +13,7 @@ interface EditProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: UserProfile;
-  onSave: (updated: UserProfile) => void | Promise<void>;
+  onSave: (updated: UserProfile) => Promise<string | null | void> | void;
 }
 
 export const PRESET_AVATARS = [
@@ -54,6 +54,15 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
       setErrorMsg(null);
     }
   }, [isOpen, profile]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isSaving) onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, isSaving, onClose]);
 
   if (!isOpen) return null;
 
@@ -105,13 +114,18 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
     }
 
     setIsSaving(true);
+    setErrorMsg(null);
     try {
-      await onSave({
+      const err = await onSave({
         name: name.trim(),
         subtitle: subtitle.trim() || 'Stay active, stay healthy!',
         avatarUrl: avatarUrl || undefined,
         presetAvatar: selectedPreset || undefined,
       });
+      if (typeof err === 'string' && err) {
+        setErrorMsg(err);
+        return;
+      }
       onClose();
     } finally {
       setIsSaving(false);

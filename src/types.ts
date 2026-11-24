@@ -47,6 +47,15 @@ export interface AuthUser {
   dailyGoalMinutes: number;
   defaultActivity: string;
   createdAt: number;
+  lastLoginAt?: number;
+}
+
+export interface UserLoginEvent {
+  id: string;
+  eventType: 'signup' | 'login';
+  userAgent?: string;
+  loggedInAt: number;
+  loggedOutAt?: number;
 }
 
 export interface UserProfile {

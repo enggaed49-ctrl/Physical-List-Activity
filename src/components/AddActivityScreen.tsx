@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Activity, ActivityStatus, ActivityCategory } from '../types';
 import { detectCategoryFromName } from '../utils/activityIcons';
+import { getTodayLocalDateString } from '../utils/formatters';
 
 interface AddActivityScreenProps {
   onSave: (activity: Omit<Activity, 'id' | 'createdAt' | 'userId'>) => Promise<void>;
@@ -24,16 +25,11 @@ export const AddActivityScreen: React.FC<AddActivityScreenProps> = ({
   onCancel,
 }) => {
   const [name, setName] = useState('');
-  const [date, setDate] = useState(() => {
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
-  });
+  const [date, setDate] = useState(() => getTodayLocalDateString());
   const [duration, setDuration] = useState('30');
   const [status, setStatus] = useState<ActivityStatus>('Completed');
   const [category, setCategory] = useState<ActivityCategory>('Cardio');
+  const [categoryOverridden, setCategoryOverridden] = useState(false);
   const [description, setDescription] = useState('');
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [isSaving, setIsSaving] = useState(false);
@@ -114,7 +110,11 @@ export const AddActivityScreen: React.FC<AddActivityScreenProps> = ({
                 type="text"
                 value={name}
                 onChange={(e) => {
-                  setName(e.target.value);
+                  const val = e.target.value;
+                  setName(val);
+                  if (!categoryOverridden && val.trim()) {
+                    setCategory(detectCategoryFromName(val) as ActivityCategory);
+                  }
                   if (errors.name) setErrors((prev) => ({ ...prev, name: '' }));
                 }}
                 placeholder="e.g. Morning Run, Gym, Yoga"
@@ -141,6 +141,7 @@ export const AddActivityScreen: React.FC<AddActivityScreenProps> = ({
                   onClick={() => {
                     setName(item);
                     setCategory(detectCategoryFromName(item) as ActivityCategory);
+                    setCategoryOverridden(false);
                     if (errors.name) setErrors((prev) => ({ ...prev, name: '' }));
                   }}
                   className={`min-h-[40px] sm:min-h-[34px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
@@ -165,7 +166,10 @@ export const AddActivityScreen: React.FC<AddActivityScreenProps> = ({
                 <button
                   key={cat}
                   type="button"
-                  onClick={() => setCategory(cat)}
+                  onClick={() => {
+                    setCategory(cat);
+                    setCategoryOverridden(true);
+                  }}
                   className={`min-h-[44px] sm:min-h-[38px] px-3 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                     category === cat
                       ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white'

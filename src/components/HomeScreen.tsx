@@ -11,7 +11,12 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Activity, AuthUser, WorkoutSession } from '../types';
-import { formatDateDisplay, formatDuration } from '../utils/formatters';
+import {
+  formatDateDisplay,
+  formatDuration,
+  getTodayLocalDateString,
+  parseLocalDateMs,
+} from '../utils/formatters';
 import { getActivityIcon, getStatusMeta, getCategoryColor } from '../utils/activityIcons';
 import { formatStopwatch } from './ActiveWorkoutModal';
 import { PRESET_AVATARS } from './EditProfileModal';
@@ -58,11 +63,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const totalMinutesAll = activities.reduce((sum, a) => sum + (a.durationMinutes || 0), 0);
   const completionRate = totalActivities > 0 ? Math.round((completedActivities / totalActivities) * 100) : 0;
 
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const dd = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${yyyy}-${mm}-${dd}`;
+  const todayStr = getTodayLocalDateString();
 
   const todayActivities = activities.filter((a) => a.date === todayStr);
   const todayCompletedMinutes = todayActivities.reduce((sum, a) => sum + (a.durationMinutes || 0), 0);
@@ -74,8 +75,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   const recentActivities = [...activities]
     .sort((a, b) => {
-      const dateDiff = new Date(b.date).getTime() - new Date(a.date).getTime();
-      return dateDiff !== 0 ? dateDiff : b.createdAt - a.createdAt;
+      const dateDiff = parseLocalDateMs(b.date) - parseLocalDateMs(a.date);
+      return !isNaN(dateDiff) && dateDiff !== 0 ? dateDiff : b.createdAt - a.createdAt;
     })
     .slice(0, 5);
 

@@ -2,7 +2,11 @@ import React, { useState, useMemo } from 'react';
 import { ArrowLeft, CheckCircle2, Clock, Flame, Layers } from 'lucide-react';
 import { Activity, StatPeriod } from '../types';
 import { getActivityIcon } from '../utils/activityIcons';
-import { formatDuration } from '../utils/formatters';
+import {
+  estimateActivityCalories,
+  formatDuration,
+  parseLocalDateMs,
+} from '../utils/formatters';
 
 interface StatisticsScreenProps {
   activities: Activity[];
@@ -21,13 +25,13 @@ export const StatisticsScreen: React.FC<StatisticsScreenProps> = ({
     const oneDay = 24 * 60 * 60 * 1000;
 
     const hasRecentActivity = activities.some((a) => {
-      const t = new Date(a.date).getTime();
+      const t = parseLocalDateMs(a.date);
       return !isNaN(t) && Math.abs(now - t) <= 60 * oneDay;
     });
 
     const newestTime = Math.max(
       ...activities.map((a) => {
-        const t = new Date(a.date).getTime();
+        const t = parseLocalDateMs(a.date);
         return isNaN(t) ? 0 : t;
       })
     );
@@ -35,7 +39,7 @@ export const StatisticsScreen: React.FC<StatisticsScreenProps> = ({
     const baseTime = hasRecentActivity ? now : newestTime > 0 ? newestTime : now;
 
     return activities.filter((act) => {
-      const actTime = new Date(act.date).getTime();
+      const actTime = parseLocalDateMs(act.date);
       if (isNaN(actTime)) return true;
       const diff = baseTime - actTime;
       if (period === 'Weekly') {
@@ -54,7 +58,10 @@ export const StatisticsScreen: React.FC<StatisticsScreenProps> = ({
 
   const totalMinutes = filteredActivities.reduce((acc, a) => acc + (a.durationMinutes || 0), 0);
   const completionRate = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
-  const totalCalories = Math.round(totalMinutes * 7.5);
+  const totalCalories = filteredActivities.reduce(
+    (acc, a) => acc + estimateActivityCalories(a.name, a.durationMinutes || 0),
+    0
+  );
 
   const typeMap = useMemo(() => {
     const map: { [key: string]: { count: number; minutes: number } } = {};

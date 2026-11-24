@@ -2,7 +2,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { db, DatabaseSetupError } from './db.ts';
+import { db, DatabaseSetupError, isSupabaseConfigured } from './db.ts';
 import type { UserRecord, ActivityRecord } from './db.ts';
 
 dotenv.config();
@@ -139,6 +139,7 @@ function sanitizeUser(user: UserRecord) {
     dailyGoalMinutes: user.dailyGoalMinutes,
     defaultActivity: user.defaultActivity,
     createdAt: user.createdAt,
+    lastLoginAt: user.lastLoginAt,
   };
 }
 
@@ -224,18 +225,19 @@ app.get('/api/status', async (_req, res) => {
     const health = await db.checkHealth();
     return res.json({
       ok: true,
-      status: 'ready',
+      status: health.storage === 'supabase' && health.tablesReady ? 'ready' : 'needs_setup',
       version: '2.0.0',
       storage: health.storage,
       tablesReady: health.tablesReady,
     });
-  } catch {
+  } catch (err) {
     return res.json({
       ok: true,
-      status: 'ready',
+      status: 'needs_setup',
       version: '2.0.0',
-      storage: 'local',
+      storage: isSupabaseConfigured() ? 'supabase' : 'unconfigured',
       tablesReady: false,
+      ...(err instanceof DatabaseSetupError ? { message: err.message } : {}),
     });
   }
 });
@@ -303,15 +305,18 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
         ? req.headers['user-agent'].slice(0, 200)
         : undefined;
 
-    await db.recordLogin({
-      id: `lgn_${crypto.randomUUID()}`,
-      userId: savedUser.id,
-      email: savedUser.email,
-      eventType: 'signup',
-      tokenJti: jti,
-      userAgent,
-      loggedInAt: now,
-    });
+    await Promise.all([
+      db.recordLogin({
+        id: `lgn_${crypto.randomUUID()}`,
+        userId: savedUser.id,
+        email: savedUser.email,
+        eventType: 'signup',
+        tokenJti: jti,
+        userAgent,
+        loggedInAt: now,
+      }),
+      db.syncAuthUser(savedUser.email, rawPassword, savedUser.name, savedUser.id),
+    ]);
 
     return res.status(201).json({ token, user: sanitizeUser(savedUser) });
   } catch (err) {
@@ -368,7 +373,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       }),
     ]);
 
-    return res.json({ token, user: sanitizeUser(user) });
+    return res.json({ token, user: sanitizeUser({ ...user, lastLoginAt: loginTime }) });
   } catch (err) {
     return respondRouteError(res, err, 'Unable to log in right now. Please try again.');
   }
@@ -393,6 +398,23 @@ app.post('/api/auth/logout', async (req: AuthenticatedRequest, res: Response) =>
 
 app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   return res.json({ user: sanitizeUser(req.user!) });
+});
+
+app.get('/api/auth/logins', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const logins = await db.listLoginsByUser(req.user!.id, 8);
+    return res.json({
+      logins: logins.map((item) => ({
+        id: item.id,
+        eventType: item.eventType,
+        userAgent: item.userAgent,
+        loggedInAt: item.loggedInAt,
+        loggedOutAt: item.loggedOutAt,
+      })),
+    });
+  } catch (err) {
+    return respondRouteError(res, err, 'Unable to load sign-in history.');
+  }
 });
 
 app.put('/api/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

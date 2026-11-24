@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Activity as ActivityIcon,
   ArrowLeft,
@@ -55,6 +55,15 @@ export const AppShell: React.FC<AppShellProps> = ({
   children,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileMenuOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mobileMenuOpen]);
 
   const showMobileBack =
     currentScreen === 'add' ||
@@ -192,8 +201,8 @@ export const AppShell: React.FC<AppShellProps> = ({
 
       {/* MOBILE HAMBURGER DRAWER OVERLAY */}
       {mobileMenuOpen && (
-        <div className="md:hidden fixed inset-0 top-14 z-45 bg-slate-950/50 backdrop-blur-xs">
-          <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 p-4 space-y-4 shadow-xl">
+        <div className="md:hidden fixed inset-0 top-14 z-45 bg-slate-950/50 backdrop-blur-xs flex flex-col">
+          <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 p-4 space-y-4 shadow-xl overflow-y-auto">
             {/* Signed-in user info */}
             <div className="pb-3 border-b border-slate-100 dark:border-slate-800">
               <p className="text-sm font-bold text-slate-900 dark:text-white truncate">{user.name}</p>
@@ -272,7 +281,7 @@ export const AppShell: React.FC<AppShellProps> = ({
               </button>
             </div>
           </div>
-          <div className="h-full" onClick={() => setMobileMenuOpen(false)} />
+          <div className="flex-1" onClick={() => setMobileMenuOpen(false)} />
         </div>
       )}
 

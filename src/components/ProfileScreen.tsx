@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   User,
   BarChart3,
@@ -13,8 +13,11 @@ import {
   ListFilter,
   Moon,
   Sun,
+  History,
 } from 'lucide-react';
-import { Activity, AuthUser, UserProfile } from '../types';
+import { Activity, AuthUser, UserLoginEvent, UserProfile } from '../types';
+import { authService } from '../services/authService';
+import { formatDateTimeDisplay, getTodayLocalDateString } from '../utils/formatters';
 import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 
 interface ProfileScreenProps {
@@ -22,7 +25,7 @@ interface ProfileScreenProps {
   activities: Activity[];
   isDarkMode: boolean;
   onToggleDarkMode: (val: boolean) => void;
-  onUpdateProfile: (updated: UserProfile) => Promise<void>;
+  onUpdateProfile: (updated: UserProfile) => Promise<string | null>;
   onSetDailyGoal: (mins: number) => Promise<void>;
   onNavigateToActivities: () => void;
   onNavigateToStatistics: () => void;
@@ -32,6 +35,32 @@ interface ProfileScreenProps {
 }
 
 const GOAL_PRESETS = [15, 30, 45, 60, 90, 120];
+
+function summarizeDevice(userAgent?: string): string {
+  if (!userAgent) return 'Web Session';
+  const ua = userAgent.toLowerCase();
+  const os = ua.includes('iphone') || ua.includes('ipad')
+    ? 'iOS'
+    : ua.includes('android')
+      ? 'Android'
+      : ua.includes('mac')
+        ? 'macOS'
+        : ua.includes('win')
+          ? 'Windows'
+          : ua.includes('linux')
+            ? 'Linux'
+            : 'Browser';
+  const browser = ua.includes('edg/')
+    ? 'Edge'
+    : ua.includes('chrome/') && !ua.includes('edg/')
+      ? 'Chrome'
+      : ua.includes('safari/') && !ua.includes('chrome/')
+        ? 'Safari'
+        : ua.includes('firefox/')
+          ? 'Firefox'
+          : 'Web';
+  return `${browser} on ${os}`;
+}
 
 export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   user,
@@ -47,17 +76,28 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   onLogout,
 }) => {
   const [isEditProfileOpen, setIsEditProfileOpen] = useState(false);
+  const [loginHistory, setLoginHistory] = useState<UserLoginEvent[]>([]);
+  const [isLoadingLogins, setIsLoadingLogins] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    setIsLoadingLogins(true);
+    authService.getLoginHistory().then((res) => {
+      if (!active) return;
+      setLoginHistory(res.logins);
+      setIsLoadingLogins(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [user.id, user.lastLoginAt]);
 
   const dailyGoalMinutes = user.dailyGoalMinutes || 60;
   const totalMinutes = activities.reduce((sum, a) => sum + (a.durationMinutes || 0), 0);
   const completedCount = activities.filter((a) => a.status === 'Completed').length;
   const activePresetObj = PRESET_AVATARS.find((p) => p.id === user.presetAvatar);
 
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const dd = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${yyyy}-${mm}-${dd}`;
+  const todayStr = getTodayLocalDateString();
   const todayMinutes = activities
     .filter((a) => a.date === todayStr)
     .reduce((sum, a) => sum + (a.durationMinutes || 0), 0);
@@ -73,10 +113,10 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-          Account & Profile
+          Account &amp; Profile
         </h1>
         <p className="text-sm text-slate-500 dark:text-slate-400">
-          Manage your personal details, daily fitness target, and preferences
+          Manage your personal details, daily fitness target, and sign-in activity
         </p>
       </div>
 
@@ -295,7 +335,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               <div className="flex items-center gap-3.5">
                 <Settings className="w-5 h-5 text-slate-500 dark:text-slate-400" />
                 <div>
-                  <p className="text-sm font-semibold text-slate-900 dark:text-white">Preferences & Data</p>
+                  <p className="text-sm font-semibold text-slate-900 dark:text-white">Preferences &amp; Data</p>
                   <p className="text-xs text-slate-500 dark:text-slate-400">Quick-start defaults and starter data</p>
                 </div>
               </div>
@@ -318,6 +358,59 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">View</span>
             </button>
           </div>
+
+          {/* Recent Sign-In Sessions (connected to user_logins table) */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2.5">
+              <History className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                Recent Sign-In Activity
+              </h3>
+            </div>
+
+            {isLoadingLogins ? (
+              <div className="p-5 space-y-2.5">
+                {[1, 2].map((i) => (
+                  <div key={i} className="h-11 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse" />
+                ))}
+              </div>
+            ) : loginHistory.length === 0 ? (
+              <p className="p-5 text-sm text-slate-500 dark:text-slate-400">
+                No recent sign-in records found.
+              </p>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {loginHistory.map((item) => (
+                  <div
+                    key={item.id}
+                    className="px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-sm"
+                  >
+                    <div>
+                      <p className="font-semibold text-slate-900 dark:text-white">
+                        {item.eventType === 'signup' ? 'Account Created' : 'Signed In'}{' '}
+                        <span className="font-normal text-slate-500 dark:text-slate-400">
+                          · {summarizeDevice(item.userAgent)}
+                        </span>
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums mt-0.5">
+                        Signed in {formatDateTimeDisplay(item.loggedInAt)}
+                        {item.loggedOutAt ? ` · Signed out ${formatDateTimeDisplay(item.loggedOutAt)}` : ''}
+                      </p>
+                    </div>
+                    <span
+                      className={`text-xs font-semibold shrink-0 ${
+                        item.loggedOutAt
+                          ? 'text-slate-500 dark:text-slate-400'
+                          : 'text-emerald-700 dark:text-emerald-400'
+                      }`}
+                    >
+                      {item.loggedOutAt ? 'Ended' : 'Active'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -331,9 +424,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             avatarUrl: user.avatarUrl,
             presetAvatar: user.presetAvatar,
           }}
-          onSave={(updated) => {
-            onUpdateProfile(updated);
-          }}
+          onSave={onUpdateProfile}
         />
       )}
     </div>

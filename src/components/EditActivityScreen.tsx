@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ArrowLeft,
   Calendar as CalendarIcon,
@@ -34,6 +34,18 @@ export const EditActivityScreen: React.FC<EditActivityScreenProps> = ({
   const [description, setDescription] = useState(activity.description || '');
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setName(activity.name);
+    setDate(activity.date);
+    setDuration(String(activity.durationMinutes));
+    setStatus(activity.status);
+    setCategory(
+      (activity.category as ActivityCategory) || (detectCategoryFromName(activity.name) as ActivityCategory) || 'Cardio'
+    );
+    setDescription(activity.description || '');
+    setErrors({});
+  }, [activity.id, activity.name, activity.date, activity.durationMinutes, activity.status, activity.category, activity.description]);
 
   const validate = (): boolean => {
     const newErrors: { [key: string]: string } = {};

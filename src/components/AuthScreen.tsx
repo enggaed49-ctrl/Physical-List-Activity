@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { AuthUser } from '../types';
 import { authService } from '../services/authService';
+import authFitnessEditorialImg from '../assets/images/auth_fitness_editorial_1795449169011.jpg';
 
 interface AuthScreenProps {
   mode: 'login' | 'signup';
@@ -173,7 +174,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           <div className="hidden lg:flex lg:col-span-5 relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-900 min-h-[560px]">
             {!imgFailed ? (
               <img
-                src="/src/assets/images/auth_fitness_editorial_1795449169011.jpg"
+                src={authFitnessEditorialImg}
                 alt="Minimalist fitness equipment on concrete bench in morning light"
                 referrerPolicy="no-referrer"
                 onError={() => setImgFailed(true)}

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ArrowLeft,
   Calendar,
@@ -8,8 +8,12 @@ import {
   Flame,
   Layers,
 } from 'lucide-react';
-import { Activity } from '../types';
-import { formatDateDisplay, formatDuration } from '../utils/formatters';
+import { Activity, ActivityStatus } from '../types';
+import {
+  estimateActivityCalories,
+  formatDateDisplay,
+  formatDuration,
+} from '../utils/formatters';
 import { getActivityIcon, getStatusMeta, getCategoryColor } from '../utils/activityIcons';
 
 interface ActivityDetailScreenProps {
@@ -17,16 +21,31 @@ interface ActivityDetailScreenProps {
   onBack: () => void;
   onEdit: () => void;
   onDeleteRequest: () => void;
+  onChangeStatus?: (status: ActivityStatus) => Promise<void>;
 }
+
+const STATUS_OPTIONS: ActivityStatus[] = ['Completed', 'Ongoing', 'Not Started'];
 
 export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
   activity,
   onBack,
   onEdit,
   onDeleteRequest,
+  onChangeStatus,
 }) => {
+  const [updatingStatus, setUpdatingStatus] = useState(false);
   const statusMeta = getStatusMeta(activity.status);
-  const estimatedCalories = Math.round(activity.durationMinutes * 7.5);
+  const estimatedCalories = estimateActivityCalories(activity.name, activity.durationMinutes);
+
+  const handleQuickStatus = async (nextStatus: ActivityStatus) => {
+    if (!onChangeStatus || nextStatus === activity.status || updatingStatus) return;
+    setUpdatingStatus(true);
+    try {
+      await onChangeStatus(nextStatus);
+    } finally {
+      setUpdatingStatus(false);
+    }
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-5">
@@ -77,6 +96,34 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
               </div>
             </div>
           </div>
+
+          {onChangeStatus && (
+            <div className="pt-5 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Update Status
+              </h3>
+              <div className="grid grid-cols-3 gap-2">
+                {STATUS_OPTIONS.map((st) => {
+                  const isActive = activity.status === st;
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      disabled={updatingStatus}
+                      onClick={() => handleQuickStatus(st)}
+                      className={`min-h-[44px] sm:min-h-[38px] px-3 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer disabled:opacity-60 ${
+                        isActive
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {st}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="pt-5 border-t border-slate-100 dark:border-slate-800 space-y-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">

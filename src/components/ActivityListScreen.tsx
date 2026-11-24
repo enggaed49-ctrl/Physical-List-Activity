@@ -9,7 +9,11 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Activity, ActivityFilter } from '../types';
-import { formatDateDisplay, formatDuration } from '../utils/formatters';
+import {
+  formatDateDisplay,
+  formatDuration,
+  parseLocalDateMs,
+} from '../utils/formatters';
 import { getActivityIcon, getStatusMeta, getCategoryColor } from '../utils/activityIcons';
 
 interface ActivityListScreenProps {
@@ -50,8 +54,8 @@ export const ActivityListScreen: React.FC<ActivityListScreenProps> = ({
         return true;
       })
       .sort((a, b) => {
-        const dateDiff = new Date(b.date).getTime() - new Date(a.date).getTime();
-        return dateDiff !== 0 ? dateDiff : b.createdAt - a.createdAt;
+        const dateDiff = parseLocalDateMs(b.date) - parseLocalDateMs(a.date);
+        return !isNaN(dateDiff) && dateDiff !== 0 ? dateDiff : b.createdAt - a.createdAt;
       });
   }, [activities, selectedFilter, selectedCategory, searchQuery]);
 

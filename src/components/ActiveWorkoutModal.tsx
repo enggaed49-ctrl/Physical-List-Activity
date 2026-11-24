@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Play,
   Pause,
@@ -10,36 +10,26 @@ import {
   Check,
   Sparkles,
   ChevronDown,
+  AlertCircle,
 } from 'lucide-react';
 import { WorkoutSession } from '../types';
 import { getActivityIcon } from '../utils/activityIcons';
+import { estimateActivityCalories } from '../utils/formatters';
 
 interface ActiveWorkoutModalProps {
   session: WorkoutSession;
   isOpen: boolean;
   isMinimized: boolean;
+  finishRequestedAt?: number;
   onTogglePause: () => void;
   onRecordLap: () => void;
-  onFinish: (notes?: string, customName?: string) => void;
+  onFinish: (notes?: string, customName?: string) => Promise<boolean>;
   onDiscard: () => void;
   onToggleMinimize: () => void;
   onChangeActivityName: (name: string) => void;
 }
 
 const ACTIVITY_OPTIONS = ['Running', 'Gym', 'Cycling', 'Yoga', 'Swimming', 'Walking'];
-
-function estimateCalories(activityName: string, seconds: number): number {
-  const mins = seconds / 60;
-  const lower = activityName.toLowerCase();
-  let calPerMin = 7;
-  if (lower.includes('run')) calPerMin = 11;
-  else if (lower.includes('gym') || lower.includes('work') || lower.includes('lift')) calPerMin = 8;
-  else if (lower.includes('cycl') || lower.includes('bike')) calPerMin = 9;
-  else if (lower.includes('swim')) calPerMin = 10;
-  else if (lower.includes('yoga') || lower.includes('stretch')) calPerMin = 4;
-  else if (lower.includes('walk')) calPerMin = 4.5;
-  return Math.round(mins * calPerMin);
-}
 
 export function formatStopwatch(totalSeconds: number): {
   formatted: string;
@@ -65,6 +55,7 @@ export const ActiveWorkoutModal: React.FC<ActiveWorkoutModalProps> = ({
   session,
   isOpen,
   isMinimized,
+  finishRequestedAt,
   onTogglePause,
   onRecordLap,
   onFinish,
@@ -76,16 +67,56 @@ export const ActiveWorkoutModal: React.FC<ActiveWorkoutModalProps> = ({
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [notes, setNotes] = useState('');
   const [isChangingType, setIsChangingType] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (finishRequestedAt && isOpen && !isMinimized) {
+      setShowFinishConfirm(true);
+      setSaveError(null);
+    }
+  }, [finishRequestedAt, isOpen, isMinimized]);
+
+  useEffect(() => {
+    if (!isOpen || isMinimized) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (showFinishConfirm && !isSaving) {
+          setShowFinishConfirm(false);
+        } else if (showDiscardConfirm) {
+          setShowDiscardConfirm(false);
+        } else if (isChangingType) {
+          setIsChangingType(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, isMinimized, showFinishConfirm, showDiscardConfirm, isChangingType, isSaving]);
 
   if (!isOpen || isMinimized) return null;
 
   const { minutes, seconds, hours } = formatStopwatch(session.secondsElapsed);
-  const estCalories = estimateCalories(session.activityName, session.secondsElapsed);
+  const estCalories = estimateActivityCalories(session.activityName, session.secondsElapsed / 60);
   const durationMinutes = Math.max(1, Math.round(session.secondsElapsed / 60));
 
-  const handleFinishSave = () => {
-    onFinish(notes.trim() || undefined, session.activityName);
-    setShowFinishConfirm(false);
+  const handleFinishSave = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const ok = await onFinish(notes.trim() || undefined, session.activityName);
+      if (ok) {
+        setShowFinishConfirm(false);
+        setNotes('');
+      } else {
+        setSaveError('Could not save workout. Please try again.');
+      }
+    } catch {
+      setSaveError('Could not save workout. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -348,23 +379,33 @@ export const ActiveWorkoutModal: React.FC<ActiveWorkoutModalProps> = ({
                   placeholder="e.g. Great pace, felt strong!"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  className="w-full h-11 px-3.5 bg-slate-800 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  disabled={isSaving}
+                  className="w-full h-11 px-3.5 bg-slate-800 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 disabled:opacity-60"
                 />
               </div>
+
+              {saveError && (
+                <div className="p-2.5 rounded-xl bg-rose-950/60 border border-rose-800 text-xs text-rose-300 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{saveError}</span>
+                </div>
+              )}
 
               <div className="flex gap-2.5 pt-1">
                 <button
                   type="button"
                   onClick={handleFinishSave}
-                  className="flex-1 min-h-[48px] py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm cursor-pointer transition-colors flex items-center justify-center gap-1.5"
+                  disabled={isSaving}
+                  className="flex-1 min-h-[48px] py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold text-sm cursor-pointer transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Sparkles className="w-4 h-4" />
-                  <span>Save Activity</span>
+                  <span>{isSaving ? 'Saving...' : 'Save Activity'}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowFinishConfirm(false)}
-                  className="min-h-[48px] px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-sm transition-colors cursor-pointer"
+                  disabled={isSaving}
+                  className="min-h-[48px] px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-200 font-semibold text-sm transition-colors cursor-pointer"
                 >
                   Resume
                 </button>

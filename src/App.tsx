@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import confetti from 'canvas-confetti';
 import {
   Activity,
+  ActivityStatus,
   AuthUser,
   BottomNavTab,
   Screen,
@@ -26,6 +27,7 @@ import { AboutModal } from './components/AboutModal';
 import { ActiveWorkoutModal } from './components/ActiveWorkoutModal';
 import { FloatingMiniTimer } from './components/FloatingMiniTimer';
 import { detectCategoryFromName } from './utils/activityIcons';
+import { getTodayLocalDateString } from './utils/formatters';
 
 interface ParsedRoute {
   screen: Screen;
@@ -135,6 +137,7 @@ export default function App() {
   const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null);
   const [isWorkoutModalOpen, setIsWorkoutModalOpen] = useState(false);
   const [isWorkoutMinimized, setIsWorkoutMinimized] = useState(false);
+  const [finishRequestedAt, setFinishRequestedAt] = useState<number>(0);
 
   // Dark Mode Preference
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -324,19 +327,21 @@ export default function App() {
   };
 
   // Profile & preferences persistence
-  const handleUpdateProfile = async (updated: UserProfile) => {
+  const handleUpdateProfile = async (updated: UserProfile): Promise<string | null> => {
     const res = await authService.updateProfile({
       name: updated.name,
       subtitle: updated.subtitle,
-      presetAvatar: updated.presetAvatar,
-      avatarUrl: updated.avatarUrl,
+      presetAvatar: updated.presetAvatar ?? null,
+      avatarUrl: updated.avatarUrl ?? null,
     });
     if (res.user) {
       setCurrentUser(res.user);
       showToast('Profile updated.');
-    } else if (res.error) {
-      showToast(res.error);
+      return null;
     }
+    const errMsg = res.error || 'Could not update profile.';
+    showToast(errMsg);
+    return errMsg;
   };
 
   const handleSetDailyGoal = async (mins: number) => {
@@ -415,23 +420,15 @@ export default function App() {
     setActiveSession((prev) => (prev ? { ...prev, activityName: newName } : null));
   };
 
-  const handleFinishWorkout = async (notes?: string, customName?: string) => {
-    if (!activeSession) return;
+  const handleFinishWorkout = async (notes?: string, customName?: string): Promise<boolean> => {
+    if (!activeSession) return false;
     const elapsedSecs = activeSession.secondsElapsed;
     const durationMinutes = Math.max(1, Math.round(elapsedSecs / 60));
     const actName = customName || activeSession.activityName || 'Running';
     const cat = detectCategoryFromName(actName);
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
-    const todayStr = `${yyyy}-${mm}-${dd}`;
+    const todayStr = getTodayLocalDateString();
 
-    setActiveSession(null);
-    setIsWorkoutModalOpen(false);
-    setIsWorkoutMinimized(false);
-
-    await handleCreateActivity({
+    const saved = await handleCreateActivity({
       name: actName,
       date: todayStr,
       durationMinutes,
@@ -441,12 +438,21 @@ export default function App() {
         notes ||
         `Quick workout completed (${Math.floor(elapsedSecs / 60)}m ${elapsedSecs % 60}s)`,
     });
+
+    if (saved) {
+      setActiveSession(null);
+      setIsWorkoutModalOpen(false);
+      setIsWorkoutMinimized(false);
+      setFinishRequestedAt(0);
+    }
+    return saved;
   };
 
   const handleDiscardWorkout = () => {
     setActiveSession(null);
     setIsWorkoutModalOpen(false);
     setIsWorkoutMinimized(false);
+    setFinishRequestedAt(0);
     showToast('Workout session discarded.');
   };
 
@@ -455,12 +461,20 @@ export default function App() {
     setIsWorkoutModalOpen(true);
   };
 
+  const handleFinishPromptFromMini = () => {
+    setIsWorkoutMinimized(false);
+    setIsWorkoutModalOpen(true);
+    setFinishRequestedAt(Date.now());
+  };
+
   const handleToggleMinimize = () => {
     setIsWorkoutMinimized((prev) => !prev);
   };
 
   // CRUD Handlers
-  const handleCreateActivity = async (data: Omit<Activity, 'id' | 'createdAt' | 'userId'>) => {
+  const handleCreateActivity = async (
+    data: Omit<Activity, 'id' | 'createdAt' | 'userId'>
+  ): Promise<boolean> => {
     const res = await activityService.createActivity(data);
     if (res.activity) {
       setActivities((prev) => [res.activity!, ...prev]);
@@ -475,9 +489,11 @@ export default function App() {
       } catch {
         // ignore confetti error
       }
+      return true;
     } else if (res.error) {
       showToast(res.error);
     }
+    return false;
   };
 
   const handleSelectActivity = (act: Activity) => {
@@ -492,6 +508,21 @@ export default function App() {
       );
       navigateTo('details', { activityId: res.activity.id });
       showToast('Activity updated.');
+    } else if (res.error) {
+      showToast(res.error);
+    }
+  };
+
+  const handleChangeActivityStatus = async (activity: Activity, nextStatus: ActivityStatus) => {
+    const res = await activityService.updateActivity({
+      ...activity,
+      status: nextStatus,
+    });
+    if (res.activity) {
+      setActivities((prev) =>
+        prev.map((act) => (act.id === res.activity!.id ? res.activity! : act))
+      );
+      showToast(`Status updated to ${nextStatus}.`);
     } else if (res.error) {
       showToast(res.error);
     }
@@ -612,7 +643,9 @@ export default function App() {
 
           {currentScreen === 'add' && (
             <AddActivityScreen
-              onSave={handleCreateActivity}
+              onSave={async (data) => {
+                await handleCreateActivity(data);
+              }}
               onCancel={() => navigateTo('list')}
             />
           )}
@@ -623,6 +656,7 @@ export default function App() {
               onBack={() => navigateTo('list')}
               onEdit={() => navigateTo('edit', { activityId: selectedActivity.id })}
               onDeleteRequest={() => setDeleteTarget(selectedActivity)}
+              onChangeStatus={(nextStatus) => handleChangeActivityStatus(selectedActivity, nextStatus)}
             />
           )}
 
@@ -676,7 +710,7 @@ export default function App() {
                 session={activeSession}
                 onTogglePause={handleToggleWorkoutPause}
                 onMaximize={handleResumeWorkout}
-                onFinishPrompt={handleResumeWorkout}
+                onFinishPrompt={handleFinishPromptFromMini}
               />
             )}
 
@@ -700,6 +734,7 @@ export default function App() {
               session={activeSession}
               isOpen={isWorkoutModalOpen}
               isMinimized={isWorkoutMinimized}
+              finishRequestedAt={finishRequestedAt}
               onTogglePause={handleToggleWorkoutPause}
               onRecordLap={handleRecordWorkoutLap}
               onFinish={handleFinishWorkout}

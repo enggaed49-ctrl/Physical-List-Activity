@@ -2,8 +2,11 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 import crypto from 'crypto';
+import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+
+dotenv.config();
 
 export interface UserRecord {
   id: string;
@@ -60,7 +63,7 @@ export class DatabaseSetupError extends Error {
 // Supabase Client Setup (Server-side Service Role Key Only)
 // -------------------------------------------------------------
 let cachedSupabase: SupabaseClient | null = null;
-let supabaseInitChecked = false;
+let cachedEnvSignature = '';
 
 function isValidSupabaseUrl(raw: string): boolean {
   try {
@@ -71,27 +74,65 @@ function isValidSupabaseUrl(raw: string): boolean {
   }
 }
 
-export function getSupabaseClient(): SupabaseClient | null {
-  if (supabaseInitChecked) return cachedSupabase;
-  supabaseInitChecked = true;
+function isPublishableOrAnonKey(key: string): boolean {
+  if (key.startsWith('sb_publishable_')) return true;
+  const parts = key.split('.');
+  if (parts.length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+      if (payload?.role === 'anon') return true;
+    } catch {
+      // ignore decode errors
+    }
+  }
+  return false;
+}
 
-  const url = process.env.SUPABASE_URL?.trim() || '';
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || '';
+function resolveSupabaseCredentials(): { url: string; serviceKey: string } {
+  const url = (
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    ''
+  ).trim();
+  const serviceKey = (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    ''
+  ).trim();
+  return { url, serviceKey };
+}
+
+function isLocalFallbackAllowed(): boolean {
+  return process.env.ALLOW_LOCAL_FALLBACK === 'true' && !process.env.VERCEL;
+}
+
+export function getSupabaseClient(): SupabaseClient | null {
+  const { url, serviceKey } = resolveSupabaseCredentials();
+  const signature = `${url}::${serviceKey ? 'set' : 'unset'}`;
+
+  if (cachedSupabase && cachedEnvSignature === signature) {
+    return cachedSupabase;
+  }
 
   if (!url || !serviceKey) {
-    if (url && !serviceKey) {
-      console.warn(
-        'SUPABASE_URL is set without SUPABASE_SERVICE_ROLE_KEY. Using local file fallback until SUPABASE_SERVICE_ROLE_KEY is configured.'
-      );
-    }
     return null;
   }
 
   if (!isValidSupabaseUrl(url)) {
-    console.warn('Invalid SUPABASE_URL format. Falling back to local store.');
-    return null;
+    throw new DatabaseSetupError(
+      'Invalid SUPABASE_URL format. Use your full https://...supabase.co project URL.'
+    );
   }
 
+  if (isPublishableOrAnonKey(serviceKey)) {
+    throw new DatabaseSetupError(
+      'SUPABASE_SERVICE_ROLE_KEY is set to a public/anon key. Replace it with your Supabase service_role/secret key.'
+    );
+  }
+
+  cachedEnvSignature = signature;
   cachedSupabase = createClient(url, serviceKey, {
     auth: {
       persistSession: false,
@@ -102,8 +143,33 @@ export function getSupabaseClient(): SupabaseClient | null {
   return cachedSupabase;
 }
 
+function requireSupabaseOrFallback(): SupabaseClient | null {
+  const client = getSupabaseClient();
+  if (client) return client;
+  if (isLocalFallbackAllowed()) return null;
+
+  const { url, serviceKey } = resolveSupabaseCredentials();
+  if (url && !serviceKey) {
+    throw new DatabaseSetupError(
+      'SUPABASE_SERVICE_ROLE_KEY is missing. Add it to your server environment variables (or Vercel Project Settings) so accounts and data save to Supabase.'
+    );
+  }
+  if (!url && serviceKey) {
+    throw new DatabaseSetupError(
+      'SUPABASE_URL is missing. Add it to your server environment variables (or Vercel Project Settings) so accounts and data save to Supabase.'
+    );
+  }
+  throw new DatabaseSetupError(
+    'Supabase is not connected yet. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to your server environment variables and run supabase/schema.sql in Supabase.'
+  );
+}
+
 export function isSupabaseConfigured(): boolean {
-  return getSupabaseClient() !== null;
+  try {
+    return getSupabaseClient() !== null;
+  } catch {
+    return false;
+  }
 }
 
 function handleSupabaseError(error: { code?: string; message?: string } | null, context: string): never {
@@ -118,6 +184,23 @@ function handleSupabaseError(error: { code?: string; message?: string } | null, 
   ) {
     throw new DatabaseSetupError(
       'Database tables are not set up yet. Run supabase/schema.sql in your Supabase SQL Editor.'
+    );
+  }
+  if (
+    code === '42501' ||
+    msg.toLowerCase().includes('row-level security')
+  ) {
+    throw new DatabaseSetupError(
+      'Supabase rejected the request due to Row Level Security. Ensure SUPABASE_SERVICE_ROLE_KEY uses your secret service_role key, not the anon/public key.'
+    );
+  }
+  if (
+    code === 'PGRST301' ||
+    msg.toLowerCase().includes('invalid api key') ||
+    msg.toLowerCase().includes('jwt')
+  ) {
+    throw new DatabaseSetupError(
+      'Database credentials appear invalid. Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
     );
   }
   throw new Error(`${context}: ${msg || 'Database request failed'}`);
@@ -245,11 +328,14 @@ function persistLocalStore(data: AppStoreData): Promise<void> {
 // Unified Repository Operations
 // -------------------------------------------------------------
 export const db = {
-  async checkHealth(): Promise<{ storage: 'supabase' | 'local'; tablesReady: boolean }> {
+  async checkHealth(): Promise<{ storage: 'supabase' | 'local' | 'unconfigured'; tablesReady: boolean }> {
     const supabase = getSupabaseClient();
     if (!supabase) {
-      loadLocalStore();
-      return { storage: 'local', tablesReady: true };
+      if (isLocalFallbackAllowed()) {
+        loadLocalStore();
+        return { storage: 'local', tablesReady: true };
+      }
+      return { storage: 'unconfigured', tablesReady: false };
     }
 
     const [usersRes, loginsRes, activitiesRes] = await Promise.all([
@@ -263,7 +349,7 @@ export const db = {
   },
 
   async findUserByEmail(email: string): Promise<UserRecord | null> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       return store.users.find((u) => u.email === email) || null;
@@ -280,7 +366,7 @@ export const db = {
   },
 
   async findUserById(id: string): Promise<UserRecord | null> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       return store.users.find((u) => u.id === id) || null;
@@ -297,7 +383,7 @@ export const db = {
   },
 
   async createUser(user: UserRecord): Promise<UserRecord> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       await persistLocalStore({
@@ -332,7 +418,7 @@ export const db = {
   },
 
   async updateLastLogin(userId: string, timestamp: number): Promise<void> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       await persistLocalStore({
@@ -352,7 +438,7 @@ export const db = {
   },
 
   async recordLogin(entry: UserLoginRecord): Promise<void> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       await persistLocalStore({
@@ -378,7 +464,7 @@ export const db = {
   },
 
   async markLogout(tokenJti: string, timestamp: number): Promise<void> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       await persistLocalStore({
@@ -399,13 +485,53 @@ export const db = {
     if (error) handleSupabaseError(error, 'Failed to update logout timestamp');
   },
 
+  async listLoginsByUser(userId: string, limit = 10): Promise<UserLoginRecord[]> {
+    const supabase = requireSupabaseOrFallback();
+    if (!supabase) {
+      const store = loadLocalStore();
+      return store.logins
+        .filter((l) => l.userId === userId)
+        .sort((a, b) => b.loggedInAt - a.loggedInAt)
+        .slice(0, limit);
+    }
+
+    const { data, error } = await supabase
+      .from('user_logins')
+      .select('id, user_id, email, event_type, user_agent, logged_in_at, logged_out_at')
+      .eq('user_id', userId)
+      .order('logged_in_at', { ascending: false })
+      .limit(limit);
+
+    if (error) handleSupabaseError(error, 'Failed to load sign-in history');
+
+    interface LoginRow {
+      id: string;
+      user_id: string;
+      email: string;
+      event_type: 'signup' | 'login';
+      user_agent: string | null;
+      logged_in_at: number | string;
+      logged_out_at: number | string | null;
+    }
+
+    return ((data || []) as LoginRow[]).map((row) => ({
+      id: row.id,
+      userId: row.user_id,
+      email: row.email,
+      eventType: row.event_type,
+      userAgent: row.user_agent || undefined,
+      loggedInAt: Number(row.logged_in_at),
+      loggedOutAt: row.logged_out_at != null ? Number(row.logged_out_at) : undefined,
+    }));
+  },
+
   async updateUserProfile(
     userId: string,
     updates: Partial<
       Pick<UserRecord, 'name' | 'subtitle' | 'avatarUrl' | 'presetAvatar' | 'dailyGoalMinutes' | 'defaultActivity'>
     >
   ): Promise<UserRecord | null> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       const existing = store.users.find((u) => u.id === userId);
@@ -439,7 +565,7 @@ export const db = {
   },
 
   async listActivitiesByUser(userId: string): Promise<ActivityRecord[]> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       return store.activities
@@ -462,7 +588,7 @@ export const db = {
   },
 
   async createActivity(activity: ActivityRecord): Promise<ActivityRecord> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       await persistLocalStore({
@@ -494,7 +620,7 @@ export const db = {
   },
 
   async findActivityByIdAndUser(id: string, userId: string): Promise<ActivityRecord | null> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       return store.activities.find((a) => a.id === id && a.userId === userId) || null;
@@ -516,7 +642,7 @@ export const db = {
     userId: string,
     updates: Partial<Pick<ActivityRecord, 'name' | 'date' | 'durationMinutes' | 'status' | 'category' | 'description'>>
   ): Promise<ActivityRecord | null> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       const existing = store.activities.find((a) => a.id === id && a.userId === userId);
@@ -551,7 +677,7 @@ export const db = {
   },
 
   async deleteActivity(id: string, userId: string): Promise<boolean> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       const existing = store.activities.find((a) => a.id === id && a.userId === userId);
@@ -576,7 +702,7 @@ export const db = {
   },
 
   async replaceUserActivities(userId: string, activities: ActivityRecord[]): Promise<ActivityRecord[]> {
-    const supabase = getSupabaseClient();
+    const supabase = requireSupabaseOrFallback();
     if (!supabase) {
       const store = loadLocalStore();
       const otherUsersActivities = store.activities.filter((a) => a.userId !== userId);
@@ -616,5 +742,26 @@ export const db = {
 
     if (insertError) handleSupabaseError(insertError, 'Failed to insert starter activities');
     return ((data || []) as SupabaseActivityRow[]).map(mapActivityRow);
+  },
+
+  async syncAuthUser(email: string, password: string, name: string, appUserId: string): Promise<void> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    try {
+      const { error } = await supabase.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          name,
+          app_user_id: appUserId,
+        },
+      });
+      if (error && !error.message.toLowerCase().includes('already')) {
+        console.warn('Supabase Auth sync warning:', error.message);
+      }
+    } catch (err) {
+      console.warn('Supabase Auth sync skipped:', (err as Error).message);
+    }
   },
 };

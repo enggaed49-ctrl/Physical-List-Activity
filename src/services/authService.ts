@@ -1,10 +1,19 @@
-import { AuthUser } from '../types';
-import { getAccessToken, setAccessToken } from './authTokenStore';
+import { AuthUser, UserLoginEvent } from '../types';
+import { getAccessToken, notifyUnauthorized, setAccessToken } from './authTokenStore';
 
 export interface AuthResponse {
   user?: AuthUser;
   error?: string;
   fieldErrors?: Record<string, string>;
+}
+
+export interface ProfileUpdatePayload {
+  name?: string;
+  subtitle?: string;
+  presetAvatar?: string | null;
+  avatarUrl?: string | null;
+  dailyGoalMinutes?: number;
+  defaultActivity?: string;
 }
 
 export const authService = {
@@ -65,9 +74,10 @@ export const authService = {
     }
   },
 
-  async updateProfile(updates: Partial<Pick<AuthUser, 'name' | 'subtitle' | 'presetAvatar' | 'avatarUrl' | 'dailyGoalMinutes' | 'defaultActivity'>>): Promise<AuthResponse> {
+  async updateProfile(updates: ProfileUpdatePayload): Promise<AuthResponse> {
     const token = getAccessToken();
     if (!token) {
+      notifyUnauthorized();
       return { error: 'Authentication required.' };
     }
     try {
@@ -79,6 +89,10 @@ export const authService = {
         },
         body: JSON.stringify(updates),
       });
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { error: 'Session expired. Please log in again.' };
+      }
       const data = await res.json();
       if (!res.ok) {
         return { error: data.error || 'Could not update profile.' };
@@ -86,6 +100,29 @@ export const authService = {
       return { user: data.user };
     } catch {
       return { error: 'Network error while updating profile.' };
+    }
+  },
+
+  async getLoginHistory(): Promise<{ logins: UserLoginEvent[]; error?: string }> {
+    const token = getAccessToken();
+    if (!token) {
+      return { logins: [], error: 'Authentication required.' };
+    }
+    try {
+      const res = await fetch('/api/auth/logins', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        notifyUnauthorized();
+        return { logins: [], error: 'Session expired. Please log in again.' };
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        return { logins: [], error: data.error || 'Could not load sign-in history.' };
+      }
+      return { logins: Array.isArray(data.logins) ? data.logins : [] };
+    } catch {
+      return { logins: [], error: 'Network error loading sign-in history.' };
     }
   },
 };

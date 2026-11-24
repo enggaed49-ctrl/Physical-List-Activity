@@ -11,7 +11,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Activity, AuthUser, WorkoutSession } from '../types';
-import { formatDateDisplay, formatDuration } from '../data/initialActivities';
+import { formatDateDisplay, formatDuration } from '../utils/formatters';
 import { getActivityIcon, getStatusMeta, getCategoryColor } from '../utils/activityIcons';
 import { formatStopwatch } from './ActiveWorkoutModal';
 import { PRESET_AVATARS } from './EditProfileModal';

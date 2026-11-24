@@ -1,12 +1,12 @@
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
-import { app } from './serverApp';
+import { app } from './serverApp.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

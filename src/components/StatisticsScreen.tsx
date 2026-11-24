@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { ArrowLeft, CheckCircle2, Clock, Flame, Layers } from 'lucide-react';
 import { Activity, StatPeriod } from '../types';
 import { getActivityIcon } from '../utils/activityIcons';
-import { formatDuration } from '../data/initialActivities';
+import { formatDuration } from '../utils/formatters';
 
 interface StatisticsScreenProps {
   activities: Activity[];

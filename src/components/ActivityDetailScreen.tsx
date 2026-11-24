@@ -9,7 +9,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { Activity } from '../types';
-import { formatDateDisplay, formatDuration } from '../data/initialActivities';
+import { formatDateDisplay, formatDuration } from '../utils/formatters';
 import { getActivityIcon, getStatusMeta, getCategoryColor } from '../utils/activityIcons';
 
 interface ActivityDetailScreenProps {

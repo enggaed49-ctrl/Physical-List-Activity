@@ -16,6 +16,26 @@ export interface ProfileUpdatePayload {
   defaultActivity?: string;
 }
 
+async function parseApiJson(res: Response): Promise<{ data: Record<string, any>; nonJsonError?: string }> {
+  const contentType = res.headers.get('content-type') || '';
+  const rawText = await res.text();
+  if (!rawText) return { data: {} };
+  try {
+    return { data: JSON.parse(rawText) };
+  } catch {
+    if (contentType.includes('text/html') || rawText.trim().startsWith('<')) {
+      return {
+        data: {},
+        nonJsonError: `Server API returned HTML instead of JSON (HTTP ${res.status}). Make sure the backend server or Vercel API functions are active.`,
+      };
+    }
+    return {
+      data: {},
+      nonJsonError: `Invalid server response (HTTP ${res.status}).`,
+    };
+  }
+}
+
 export const authService = {
   async signup(name: string, email: string, password: string): Promise<AuthResponse> {
     try {
@@ -24,7 +44,10 @@ export const authService = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password }),
       });
-      const data = await res.json().catch(() => ({}));
+      const { data, nonJsonError } = await parseApiJson(res);
+      if (nonJsonError) {
+        return { error: nonJsonError };
+      }
       if (!res.ok) {
         return { error: data.error || `Could not create account (HTTP ${res.status}).`, fieldErrors: data.fieldErrors };
       }
@@ -32,7 +55,7 @@ export const authService = {
         setAccessToken(data.token);
         return { user: data.user };
       }
-      return { error: 'Unexpected server response.' };
+      return { error: `Unexpected server response (HTTP ${res.status}).` };
     } catch {
       return { error: 'Network error. Please check your connection and try again.' };
     }
@@ -45,7 +68,10 @@ export const authService = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json().catch(() => ({}));
+      const { data, nonJsonError } = await parseApiJson(res);
+      if (nonJsonError) {
+        return { error: nonJsonError };
+      }
       if (!res.ok) {
         return { error: data.error || `Could not sign in (HTTP ${res.status}).`, fieldErrors: data.fieldErrors };
       }
@@ -53,7 +79,7 @@ export const authService = {
         setAccessToken(data.token);
         return { user: data.user };
       }
-      return { error: 'Unexpected server response.' };
+      return { error: `Unexpected server response (HTTP ${res.status}).` };
     } catch {
       return { error: 'Network error. Please check your connection and try again.' };
     }

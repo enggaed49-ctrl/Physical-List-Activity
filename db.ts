@@ -46,8 +46,26 @@ export interface ActivityRecord {
   createdAt: number;
 }
 
+export interface ProfileRecord {
+  id: string;
+  appUserId: string;
+  email: string;
+  name: string;
+  fullName: string;
+  subtitle: string;
+  presetAvatar?: string;
+  avatarUrl?: string;
+  dailyGoalMinutes: number;
+  defaultActivity: string;
+  rawUserMetaData: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+  lastLoginAt?: number;
+}
+
 interface AppStoreData {
   users: UserRecord[];
+  profiles: ProfileRecord[];
   logins: UserLoginRecord[];
   activities: ActivityRecord[];
 }
@@ -236,6 +254,16 @@ interface SupabaseActivityRow {
   created_at: number | string;
 }
 
+function parseEpochMs(value: number | string | null | undefined): number {
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  if (typeof value === 'string') {
+    if (/^\d+$/.test(value.trim())) return Number(value.trim());
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return Date.now();
+}
+
 function mapUserRow(row: SupabaseUserRow): UserRecord {
   return {
     id: row.id,
@@ -248,8 +276,8 @@ function mapUserRow(row: SupabaseUserRow): UserRecord {
     defaultActivity: row.default_activity || 'Running',
     passwordHash: row.password_hash,
     passwordSalt: row.password_salt,
-    createdAt: Number(row.created_at),
-    lastLoginAt: row.last_login_at != null ? Number(row.last_login_at) : undefined,
+    createdAt: parseEpochMs(row.created_at),
+    lastLoginAt: row.last_login_at != null ? parseEpochMs(row.last_login_at) : undefined,
   };
 }
 
@@ -263,8 +291,44 @@ function mapActivityRow(row: SupabaseActivityRow): ActivityRecord {
     status: row.status,
     category: row.category || 'Cardio',
     description: row.description || '',
-    createdAt: Number(row.created_at),
+    createdAt: parseEpochMs(row.created_at),
   };
+}
+
+function isMissingCategoryError(error: { code?: string; message?: string } | null): boolean {
+  const msg = (error?.message || '').toLowerCase();
+  return (error?.code === '42703' || error?.code === 'PGRST204') && msg.includes('category');
+}
+
+function isTimestampTypeError(error: { code?: string; message?: string } | null): boolean {
+  const msg = (error?.message || '').toLowerCase();
+  return (
+    error?.code === '22007' ||
+    msg.includes('timestamp') ||
+    msg.includes('time zone')
+  );
+}
+
+function toActivityInsertRow(
+  activity: ActivityRecord,
+  options: { includeCategory: boolean; createdAtAsIso: boolean }
+): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    id: activity.id,
+    user_id: activity.userId,
+    name: activity.name,
+    date: activity.date,
+    duration_minutes: activity.durationMinutes,
+    status: activity.status,
+    description: activity.description,
+    created_at: options.createdAtAsIso
+      ? new Date(activity.createdAt).toISOString()
+      : activity.createdAt,
+  };
+  if (options.includeCategory) {
+    row.category = activity.category;
+  }
+  return row;
 }
 
 // -------------------------------------------------------------
@@ -293,6 +357,7 @@ function loadLocalStore(): AppStoreData {
       if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.activities)) {
         storeCache = {
           users: parsed.users,
+          profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [],
           logins: Array.isArray(parsed.logins) ? parsed.logins : [],
           activities: parsed.activities,
         };
@@ -303,11 +368,18 @@ function loadLocalStore(): AppStoreData {
     console.warn('Could not read existing store, initializing clean store:', (err as Error).message);
   }
 
-  storeCache = { users: [], logins: [], activities: [] };
+  storeCache = { users: [], profiles: [], logins: [], activities: [] };
   return storeCache;
 }
 
-function persistLocalStore(data: AppStoreData): Promise<void> {
+function persistLocalStore(partial: Partial<AppStoreData>): Promise<void> {
+  const current = loadLocalStore();
+  const data: AppStoreData = {
+    users: partial.users ?? current.users,
+    profiles: partial.profiles ?? current.profiles,
+    logins: partial.logins ?? current.logins,
+    activities: partial.activities ?? current.activities,
+  };
   storeCache = data;
   writeQueue = writeQueue
     .then(async () => {
@@ -327,6 +399,38 @@ function persistLocalStore(data: AppStoreData): Promise<void> {
   return writeQueue;
 }
 
+function buildAuthUserMetadata(user: UserRecord): Record<string, unknown> {
+  const meta: Record<string, unknown> = {
+    app_user_id: user.id,
+    name: user.name,
+    full_name: user.name,
+    subtitle: user.subtitle,
+    preset_avatar: user.presetAvatar ?? null,
+    daily_goal_minutes: user.dailyGoalMinutes,
+    default_activity: user.defaultActivity,
+    has_custom_avatar: Boolean(user.avatarUrl),
+  };
+  if (!user.avatarUrl || user.avatarUrl.length <= 1024) {
+    meta.avatar_url = user.avatarUrl ?? null;
+  }
+  return meta;
+}
+
+async function findAuthUserIdByEmail(supabase: SupabaseClient, email: string): Promise<string | null> {
+  const target = email.trim().toLowerCase();
+  let page = 1;
+  const perPage = 200;
+  while (page <= 10) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+    if (error || !data?.users?.length) return null;
+    const match = data.users.find((u) => (u.email || '').toLowerCase() === target);
+    if (match) return match.id;
+    if (data.users.length < perPage) return null;
+    page += 1;
+  }
+  return null;
+}
+
 // -------------------------------------------------------------
 // Unified Repository Operations
 // -------------------------------------------------------------
@@ -341,13 +445,18 @@ export const db = {
       return { storage: 'unconfigured', tablesReady: false };
     }
 
-    const [usersRes, loginsRes, activitiesRes] = await Promise.all([
+    const [usersRes, profilesRes, loginsRes, activitiesRes] = await Promise.all([
       supabase.from('users').select('id').limit(1),
+      supabase.from('profiles').select('id').limit(1),
       supabase.from('user_logins').select('id').limit(1),
       supabase.from('activities').select('id').limit(1),
     ]);
 
-    const tablesReady = !usersRes.error && !loginsRes.error && !activitiesRes.error;
+    const tablesReady =
+      !usersRes.error &&
+      !profilesRes.error &&
+      !loginsRes.error &&
+      !activitiesRes.error;
     return { storage: 'supabase', tablesReady };
   },
 
@@ -602,24 +711,36 @@ export const db = {
       return activity;
     }
 
-    const { data, error } = await supabase
-      .from('activities')
-      .insert({
-        id: activity.id,
-        user_id: activity.userId,
-        name: activity.name,
-        date: activity.date,
-        duration_minutes: activity.durationMinutes,
-        status: activity.status,
-        category: activity.category,
-        description: activity.description,
-        created_at: activity.createdAt,
-      })
-      .select('*')
-      .single();
+    let includeCategory = true;
+    let createdAtAsIso = false;
+    let lastError: { code?: string; message?: string } | null = null;
 
-    if (error) handleSupabaseError(error, 'Failed to save activity');
-    return mapActivityRow(data as SupabaseActivityRow);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { data, error } = await supabase
+        .from('activities')
+        .insert(toActivityInsertRow(activity, { includeCategory, createdAtAsIso }))
+        .select('*')
+        .single();
+
+      if (!error) {
+        const mapped = mapActivityRow(data as SupabaseActivityRow);
+        if (!includeCategory) mapped.category = activity.category || 'Cardio';
+        return mapped;
+      }
+
+      lastError = error;
+      if (includeCategory && isMissingCategoryError(error)) {
+        includeCategory = false;
+        continue;
+      }
+      if (!createdAtAsIso && isTimestampTypeError(error)) {
+        createdAtAsIso = true;
+        continue;
+      }
+      break;
+    }
+
+    handleSupabaseError(lastError, 'Failed to save activity');
   },
 
   async findActivityByIdAndUser(id: string, userId: string): Promise<ActivityRecord | null> {
@@ -667,13 +788,26 @@ export const db = {
     if ('category' in updates) payload.category = updates.category;
     if ('description' in updates) payload.description = updates.description;
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('activities')
       .update(payload)
       .eq('id', id)
       .eq('user_id', userId)
       .select('*')
       .maybeSingle();
+
+    if (error && 'category' in payload && isMissingCategoryError(error)) {
+      const { category: _omit, ...withoutCategory } = payload;
+      const retry = await supabase
+        .from('activities')
+        .update(withoutCategory)
+        .eq('id', id)
+        .eq('user_id', userId)
+        .select('*')
+        .maybeSingle();
+      data = retry.data;
+      error = retry.error;
+    }
 
     if (error) handleSupabaseError(error, 'Failed to update activity');
     return data ? mapActivityRow(data as SupabaseActivityRow) : null;
@@ -726,45 +860,222 @@ export const db = {
 
     if (activities.length === 0) return [];
 
-    const rows = activities.map((a) => ({
-      id: a.id,
-      user_id: userId,
-      name: a.name,
-      date: a.date,
-      duration_minutes: a.durationMinutes,
-      status: a.status,
-      category: a.category,
-      description: a.description,
-      created_at: a.createdAt,
-    }));
+    let includeCategory = true;
+    let createdAtAsIso = false;
+    let lastError: { code?: string; message?: string } | null = null;
 
-    const { data, error: insertError } = await supabase
-      .from('activities')
-      .insert(rows)
-      .select('*');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = activities.map((a) =>
+        toActivityInsertRow(
+          { ...a, userId },
+          { includeCategory, createdAtAsIso }
+        )
+      );
+      const { data, error: insertError } = await supabase
+        .from('activities')
+        .insert(rows)
+        .select('*');
 
-    if (insertError) handleSupabaseError(insertError, 'Failed to insert starter activities');
-    return ((data || []) as SupabaseActivityRow[]).map(mapActivityRow);
+      if (!insertError) {
+        return ((data || []) as SupabaseActivityRow[]).map((row, idx) => {
+          const mapped = mapActivityRow(row);
+          if (!includeCategory && activities[idx]) {
+            mapped.category = activities[idx].category || 'Cardio';
+          }
+          return mapped;
+        });
+      }
+
+      lastError = insertError;
+      if (includeCategory && isMissingCategoryError(insertError)) {
+        includeCategory = false;
+        continue;
+      }
+      if (!createdAtAsIso && isTimestampTypeError(insertError)) {
+        createdAtAsIso = true;
+        continue;
+      }
+      break;
+    }
+
+    handleSupabaseError(lastError, 'Failed to insert starter activities');
   },
 
-  async syncAuthUser(email: string, password: string, name: string, appUserId: string): Promise<void> {
-    const supabase = getSupabaseClient();
-    if (!supabase) return;
-    try {
-      const { error } = await supabase.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-        user_metadata: {
-          name,
-          app_user_id: appUserId,
-        },
-      });
-      if (error && !error.message.toLowerCase().includes('already')) {
-        console.warn('Supabase Auth sync warning:', error.message);
-      }
-    } catch (err) {
-      console.warn('Supabase Auth sync skipped:', (err as Error).message);
+  async syncUserProfile(
+    user: UserRecord,
+    options?: { password?: string; isLogin?: boolean }
+  ): Promise<ProfileRecord | null> {
+    const supabase = requireSupabaseOrFallback();
+    const meta = buildAuthUserMetadata(user);
+    const now = Date.now();
+
+    if (!supabase) {
+      const store = loadLocalStore();
+      const existing = store.profiles.find(
+        (p) => p.appUserId === user.id || p.email.toLowerCase() === user.email.toLowerCase()
+      );
+      const profile: ProfileRecord = {
+        id: existing?.id || crypto.randomUUID(),
+        appUserId: user.id,
+        email: user.email,
+        name: user.name,
+        fullName: user.name,
+        subtitle: user.subtitle,
+        presetAvatar: user.presetAvatar,
+        avatarUrl: user.avatarUrl,
+        dailyGoalMinutes: user.dailyGoalMinutes,
+        defaultActivity: user.defaultActivity,
+        rawUserMetaData: meta,
+        createdAt: existing?.createdAt || user.createdAt || now,
+        updatedAt: now,
+        lastLoginAt: options?.isLogin ? user.lastLoginAt || now : existing?.lastLoginAt ?? user.lastLoginAt,
+      };
+      const nextProfiles = existing
+        ? store.profiles.map((p) => (p.id === existing.id ? profile : p))
+        : [profile, ...store.profiles];
+      await persistLocalStore({ profiles: nextProfiles });
+      return profile;
     }
+
+    // 1. Locate linked profile row if already created
+    const { data: profileByAppId, error: lookupByAppError } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('app_user_id', user.id)
+      .maybeSingle();
+
+    if (lookupByAppError) {
+      handleSupabaseError(lookupByAppError, 'Failed to query profiles table');
+    }
+
+    let authUserId: string | null = (profileByAppId as { id?: string } | null)?.id || null;
+
+    if (!authUserId) {
+      const { data: profileByEmail, error: lookupByEmailError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('email', user.email)
+        .limit(1)
+        .maybeSingle();
+
+      if (lookupByEmailError) {
+        handleSupabaseError(lookupByEmailError, 'Failed to query profiles table');
+      }
+      authUserId = (profileByEmail as { id?: string } | null)?.id || null;
+    }
+
+    // 2. Ensure auth.users user exists & metadata stays synced (which also fires handle_new_user trigger)
+    if (!authUserId) {
+      if (options?.password) {
+        const { data: createdAuth, error: createAuthError } = await supabase.auth.admin.createUser({
+          email: user.email,
+          password: options.password,
+          email_confirm: true,
+          user_metadata: meta,
+        });
+        if (!createAuthError && createdAuth?.user?.id) {
+          authUserId = createdAuth.user.id;
+        } else {
+          if (createAuthError && !createAuthError.message.toLowerCase().includes('already')) {
+            console.warn('Supabase Auth createUser warning:', createAuthError.message);
+          }
+          authUserId = await findAuthUserIdByEmail(supabase, user.email);
+        }
+      } else {
+        authUserId = await findAuthUserIdByEmail(supabase, user.email);
+      }
+    }
+
+    if (!authUserId) {
+      return null;
+    }
+
+    const { error: updateAuthError } = await supabase.auth.admin.updateUserById(authUserId, {
+      user_metadata: meta,
+    });
+    if (updateAuthError) {
+      console.warn('Supabase Auth metadata update warning:', updateAuthError.message);
+    }
+
+    // 3. Upsert public.profiles directly so custom avatar_url, app_user_id, and last_login_at are always persisted
+    const upsertPayload: Record<string, unknown> = {
+      id: authUserId,
+      app_user_id: user.id,
+      email: user.email,
+      name: user.name,
+      full_name: user.name,
+      subtitle: user.subtitle,
+      preset_avatar: user.presetAvatar ?? null,
+      avatar_url: user.avatarUrl ?? null,
+      daily_goal_minutes: user.dailyGoalMinutes,
+      default_activity: user.defaultActivity,
+      raw_user_meta_data: meta,
+      updated_at: new Date(now).toISOString(),
+    };
+    if (user.lastLoginAt != null) {
+      upsertPayload.last_login_at = new Date(user.lastLoginAt).toISOString();
+    }
+
+    const { data: savedProfile, error: upsertError } = await supabase
+      .from('profiles')
+      .upsert(upsertPayload, { onConflict: 'id' })
+      .select('*')
+      .single();
+
+    if (upsertError) {
+      handleSupabaseError(upsertError, 'Failed to sync user profile row');
+    }
+
+    const row = savedProfile as Record<string, unknown>;
+    return {
+      id: String(row.id),
+      appUserId: String(row.app_user_id || user.id),
+      email: String(row.email || user.email),
+      name: String(row.name || user.name),
+      fullName: String(row.full_name || row.name || user.name),
+      subtitle: String(row.subtitle || user.subtitle),
+      presetAvatar: typeof row.preset_avatar === 'string' ? row.preset_avatar : undefined,
+      avatarUrl: typeof row.avatar_url === 'string' ? row.avatar_url : undefined,
+      dailyGoalMinutes: Number(row.daily_goal_minutes) || user.dailyGoalMinutes,
+      defaultActivity: String(row.default_activity || user.defaultActivity),
+      rawUserMetaData: (row.raw_user_meta_data as Record<string, unknown>) || meta,
+      createdAt: parseEpochMs(row.created_at as string | number),
+      updatedAt: parseEpochMs(row.updated_at as string | number),
+      lastLoginAt: row.last_login_at != null ? parseEpochMs(row.last_login_at as string | number) : undefined,
+    };
+  },
+
+  async getProfileByUserId(userId: string): Promise<ProfileRecord | null> {
+    const supabase = requireSupabaseOrFallback();
+    if (!supabase) {
+      const store = loadLocalStore();
+      return store.profiles.find((p) => p.appUserId === userId) || null;
+    }
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('app_user_id', userId)
+      .maybeSingle();
+
+    if (error) handleSupabaseError(error, 'Failed to load profile');
+    if (!data) return null;
+    const row = data as Record<string, unknown>;
+    return {
+      id: String(row.id),
+      appUserId: String(row.app_user_id || userId),
+      email: String(row.email || ''),
+      name: String(row.name || ''),
+      fullName: String(row.full_name || row.name || ''),
+      subtitle: String(row.subtitle || ''),
+      presetAvatar: typeof row.preset_avatar === 'string' ? row.preset_avatar : undefined,
+      avatarUrl: typeof row.avatar_url === 'string' ? row.avatar_url : undefined,
+      dailyGoalMinutes: Number(row.daily_goal_minutes) || 60,
+      defaultActivity: String(row.default_activity || 'Running'),
+      rawUserMetaData: (row.raw_user_meta_data as Record<string, unknown>) || {},
+      createdAt: parseEpochMs(row.created_at as string | number),
+      updatedAt: parseEpochMs(row.updated_at as string | number),
+      lastLoginAt: row.last_login_at != null ? parseEpochMs(row.last_login_at as string | number) : undefined,
+    };
   },
 };

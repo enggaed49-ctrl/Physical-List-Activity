@@ -315,7 +315,7 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
         userAgent,
         loggedInAt: now,
       }),
-      db.syncAuthUser(savedUser.email, rawPassword, savedUser.name, savedUser.id),
+      db.syncUserProfile(savedUser, { password: rawPassword, isLogin: true }),
     ]);
 
     return res.status(201).json({ token, user: sanitizeUser(savedUser) });
@@ -360,6 +360,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         ? req.headers['user-agent'].slice(0, 200)
         : undefined;
 
+    const updatedUserWithLogin = { ...user, lastLoginAt: loginTime };
     await Promise.all([
       db.updateLastLogin(user.id, loginTime),
       db.recordLogin({
@@ -371,9 +372,10 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         userAgent,
         loggedInAt: loginTime,
       }),
+      db.syncUserProfile(updatedUserWithLogin, { password: rawPassword, isLogin: true }),
     ]);
 
-    return res.json({ token, user: sanitizeUser({ ...user, lastLoginAt: loginTime }) });
+    return res.json({ token, user: sanitizeUser(updatedUserWithLogin) });
   } catch (err) {
     return respondRouteError(res, err, 'Unable to log in right now. Please try again.');
   }
@@ -486,6 +488,8 @@ app.put('/api/profile', requireAuth, async (req: AuthenticatedRequest, res: Resp
       return res.status(404).json({ error: 'User not found.' });
     }
 
+    await db.syncUserProfile(updatedUser);
+
     return res.json({ user: sanitizeUser(updatedUser) });
   } catch (err) {
     return respondRouteError(res, err, 'Unable to update profile.');
@@ -525,7 +529,7 @@ app.post('/api/activities', requireAuth, async (req: AuthenticatedRequest, res: 
     const safeCategory = VALID_CATEGORIES.has(category) ? category : inferCategory(name);
 
     const newActivity: ActivityRecord = {
-      id: `act_${crypto.randomUUID()}`,
+      id: crypto.randomUUID(),
       userId,
       name: name.trim().slice(0, 100),
       date,
@@ -652,7 +656,7 @@ app.post('/api/activities/seed', requireAuth, async (req: AuthenticatedRequest, 
 
     const created = starterTemplates.map((item, idx) => ({
       ...item,
-      id: `act_${crypto.randomUUID()}`,
+      id: crypto.randomUUID(),
       userId,
       createdAt: Date.now() - idx * 1000,
     }));

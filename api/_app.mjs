@@ -1265,6 +1265,9 @@ app.post("/api/activities/seed", requireAuth, async (req, res) => {
     return respondRouteError(res, err, "Unable to load sample activities.");
   }
 });
+app.use("/api", (_req, res) => {
+  return res.status(404).json({ error: "API endpoint not found." });
+});
 app.use((err, _req, res, _next) => {
   console.error("Unhandled API error:", err);
   if (res.headersSent) return;

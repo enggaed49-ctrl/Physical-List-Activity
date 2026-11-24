@@ -668,6 +668,10 @@ app.post('/api/activities/seed', requireAuth, async (req: AuthenticatedRequest, 
   }
 });
 
+app.use('/api', (_req: Request, res: Response) => {
+  return res.status(404).json({ error: 'API endpoint not found.' });
+});
+
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Unhandled API error:', err);
   if (res.headersSent) return;
